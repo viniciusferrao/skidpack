@@ -1,0 +1,10 @@
+# LF in the repository for everything text. A CRLF shebang line makes a shell
+# script fail on Unix with a confusing "bad interpreter" error.
+* text=auto eol=lf
+*.sh text eol=lf
+
+# Except DOS batch files: COMMAND.COM wants CRLF and mis-parses a lone LF.
+*.bat text eol=crlf
+
+# The manifest is space-aligned text; keep its line endings stable.
+test/corpus.txt text eol=lf

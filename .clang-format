@@ -1,0 +1,69 @@
+# skidpack house style. This is C89 source.
+#
+# clang-format grew a real C language kind, so this says C rather than the Cpp
+# that older releases made you write. Checked against the pinned version:
+# Language: Bogus is refused as an unknown enumerated scalar, Language: C is
+# not, so it is recognised and not silently ignored.
+#
+# Nothing below selects a language standard. Formatting only moves whitespace;
+# what keeps this code C89 is the compiler, not the formatter:
+#
+#     cc -std=c89 -pedantic-errors ...      in CI, on four platforms
+#     cl /c /AL /W3                          Microsoft C 5.10, via DOSBUILD.BAT
+#
+# Pinned to clang-format 22 in CI, installed from apt.llvm.org, which packages
+# every current major for the runner image. Options and their defaults move
+# between major versions, so an unpinned formatter is one that reformats the
+# tree the day the runner image changes.
+---
+Language: C
+BasedOnStyle: LLVM
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+
+# 80, because that is what the DOS console this has to run on gives you, and
+# the help text is written to fit it. 72 was measured rather than guessed: it
+# would rewrap 354 of 2058 lines, and indentation here already reaches 35
+# columns, which leaves 37 for names like rs_buf_append_self.
+ColumnLimit: 80
+
+# Function brace on its own line, control-flow brace attached. That is what the
+# code already did and what most C of this vintage does.
+BreakBeforeBraces: Linux
+
+# Control flow never shares a line with a multi-statement body: hiding a test
+# and two statements behind one `if` is how a guard clause stops reading as a
+# guard clause. Short single-statement guards such as `if (!f) return -1;` are
+# idiomatic and dense in the error paths here, so those stay.
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortCaseLabelsOnASingleLine: false
+
+BinPackArguments: true
+BinPackParameters: true
+AlignAfterOpenBracket: Align
+
+# The option, mode and target tables are columns on purpose.
+AlignConsecutiveDeclarations: true
+AlignConsecutiveAssignments: false
+AlignTrailingComments: true
+AlignEscapedNewlines: Left
+
+PointerAlignment: Right
+DerivePointerAlignment: false
+
+# skidpack.h must follow the system headers, so leave include order alone.
+SortIncludes: Never
+IndentCaseLabels: false
+ReflowComments: true
+
+# Restore the "#  define" nesting inside conditionals; without this every
+# directive sits in column 0 and the platform split becomes hard to follow.
+IndentPPDirectives: AfterHash
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+SpaceAfterCStyleCast: false
