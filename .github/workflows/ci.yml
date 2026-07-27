@@ -1,0 +1,319 @@
+name: build
+
+# The tool targets everything from a 1988 DOS compiler to a current Unix, so
+# the build matrix is the specification, not decoration.
+on: [push, pull_request]
+
+jobs:
+  # Static analysis. cppcheck reasons about the whole translation unit rather
+  # than one expression at a time, so it reaches things -Wall cannot: buffers
+  # indexed past their end, allocations never freed on an error path, values
+  # that can only be uninitialised. GCC's analyzer walks execution paths and is
+  # good at the goto-cleanup shape this code uses throughout.
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      - name: cppcheck
+        run: |
+          cppcheck --std=c89 --enable=warning,performance,portability \
+                   --inline-suppr --error-exitcode=1 \
+                   --suppress=missingIncludeSystem \
+                   src/
+
+      # One file at a time: -c with several inputs and a single -o is an error.
+      - name: GCC analyzer
+        run: |
+          for f in src/*.c; do
+            gcc -std=c90 -pedantic-errors -Wall -Wextra -Wshadow -Wcast-qual \
+                -Wstrict-prototypes -Wmissing-prototypes -Wwrite-strings \
+                -fanalyzer -O2 -c "$f" -o /dev/null
+          done
+
+  # Runtime checks. The codec does its own allocation and pointer arithmetic, so
+  # the interesting failures are the ones a static pass cannot see.
+  sanitize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build with ASan and UBSan
+        run: |
+          clang -std=c90 -pedantic-errors -Wall -Wextra -g -O1 \
+                -fsanitize=address,undefined -fno-omit-frame-pointer \
+                -o skidpack src/*.c
+
+      - name: Exercise every path
+        run: |
+          export LC_ALL=C UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+          awk 'BEGIN{s=1;for(i=0;i<200000;i++){s=(s*25173+13849)%65536;printf "%c",int(s/256)%256}}' > flat.bin
+          yes "AAAABBBBCCCCDDDD" | head -c 100000 > repetitive.bin
+          awk 'BEGIN{a="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ";s=7;
+               for(i=0;i<100000;i++){s=(s*25173+13849)%65536;printf "%s",substr(a,(int(s/256)%63)+1,1)}}' > textish.bin
+          ./skidpack cv flat.bin p1 && ./skidpack d p1 u1 && cmp flat.bin u1
+          ./skidpack c repetitive.bin p2 && ./skidpack d p2 u2 && cmp repetitive.bin u2
+          ./skidpack verify p2
+          # --sdtitl copies bytes 4768..4863 of the output onto the end, so
+          # the input has to compress to more than 4864 bytes or the option
+          # refuses and the self-append path is never reached. The repetitive
+          # file collapses far below that; the restricted-alphabet one does
+          # not, and is the closer analogue to SDTITL.PVS anyway.
+          ./skidpack c textish.bin p3 --sdtitl
+          ./skidpack verify p3 | grep -q "96 trailing bytes"
+          echo "self-append reached and reproduced 96 trailing bytes: OK"
+          ./skidpack --help > /dev/null
+
+          # Malformed input must be REJECTED, which is not the same as "does
+          # not matter what happens". `|| true` used to swallow everything
+          # here, including an ASan or UBSan abort, so this step could contain
+          # a memory error and still pass. Now the sanitizers get distinctive
+          # exit codes and anything other than an ordinary refusal fails.
+          expect_reject() {
+            set +e
+            ASAN_OPTIONS=halt_on_error=1:exitcode=86 \
+            UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:exitcode=87 \
+              "$@" >/dev/null 2>&1
+            rc=$?
+            set -e
+            case "$rc" in
+              1|2)   return 0 ;;
+              0)     echo "FAIL: expected rejection, got success: $*" >&2; return 1 ;;
+              86|87) echo "FAIL: sanitizer fired: $*" >&2; return 1 ;;
+              *)     echo "FAIL: unexpected exit $rc: $*" >&2; return 1 ;;
+            esac
+          }
+
+          head -c 100 p2 > trunc.bin           # truncated mid-stream
+          head -c 12  p2 > stub.bin            # header only
+          printf '\002\377\377\377\020' > bogus.bin   # absurd declared length
+          : > empty.bin
+
+          expect_reject ./skidpack d trunc.bin out.bin
+          expect_reject ./skidpack d stub.bin  out.bin
+          expect_reject ./skidpack d bogus.bin out.bin
+          expect_reject ./skidpack d empty.bin out.bin
+          expect_reject ./skidpack verify stub.bin
+          expect_reject ./skidpack cr flat.bin out.bin        # cr without -esc
+          expect_reject ./skidpack d p2 out.bin --stop banana
+          expect_reject ./skidpack d p2 out.bin --stop -1
+
+          # A Huffman pass declaring one output byte and carrying no payload.
+          # The decoder can synthesise a zero bit past EOF, emit 'A', then fail
+          # with one byte already written. Accepting a non-empty buffer as
+          # success let exactly this through.
+          printf '\002\001\000\000\001\001\101' > novle.bin
+          expect_reject ./skidpack d novle.bin out.bin
+          expect_reject ./skidpack d novle.bin out.bin --target bb11
+          expect_reject ./skidpack d novle.bin out.bin --target bb10-res
+          expect_reject ./skidpack verify novle.bin
+
+          # A repeated escape byte is legal, but not when it shadows a marker
+          # the data actually needs: slots 0 and 2 share 00 here, so the run of
+          # ten emits a slot-0 token that reads back as slot 2.
+          printf 'AAAAAAAAAA' > tena.bin
+          expect_reject ./skidpack cr tena.bin bad.rle --noseq \
+                        -e 00,01,00,03,04,05,06,07,08,09
+          echo "malformed input is rejected, not crashed: OK"
+
+          # Both dialects, and the RLE-only path, which nothing above reaches.
+          ./skidpack cv flat.bin lsb.bin --target bb10-res
+          ./skidpack d  lsb.bin  lsbout.bin --target bb10-res
+          cmp flat.bin lsbout.bin
+          ./skidpack cr repetitive.bin rle.bin -e 00,01,02,03,04,05,06,07,08,09
+          ./skidpack d  rle.bin rleout.bin
+          cmp repetitive.bin rleout.bin
+          ./skidpack c repetitive.bin ns.bin --noseq
+          ./skidpack d ns.bin nsout.bin
+          cmp repetitive.bin nsout.bin
+          echo "LSB dialect, RLE-only and --noseq round trips: OK"
+
+  # Blocking, because the tree conforms. The version is pinned: clang-format's
+  # options and their defaults change between majors, so an unpinned formatter
+  # reformats the tree the day the runner image moves.
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install clang-format 22
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y clang-format-22
+
+      - name: Check formatting
+        run: clang-format-22 --dry-run --Werror --style=file src/*.c src/*.h
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cc: [gcc, clang]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build (strict C90)
+        run: |
+          ${{ matrix.cc }} -std=c90 -pedantic-errors \
+            -Wall -Wextra -Wshadow -Wcast-qual -Wformat=2 \
+            -Wstrict-prototypes -Wmissing-prototypes \
+            -O2 -o skidpack src/*.c
+
+      - name: Self-check
+        run: |
+          set -e
+          # Test data is generated, not sampled from /dev/urandom. A failure
+          # here has to be reproducible: an earlier version of this file drew
+          # from urandom and produced a run where one macOS job failed and the
+          # other passed on identical steps, which tells you nothing. LC_ALL=C
+          # also keeps awk's %c emitting single bytes rather than UTF-8.
+          export LC_ALL=C
+
+          # 16-bit LCG, high byte taken. Its period is 65536, so over 200000
+          # bytes the histogram is almost exactly flat - which is the point:
+          # a flat histogram puts all 256 symbols on eight-bit codes, and that
+          # is the case whose symbol count overflowed the tree header's byte.
+          awk 'BEGIN{s=1;for(i=0;i<200000;i++){s=(s*25173+13849)%65536;printf "%c",int(s/256)%256}}' > flat.bin
+          ./skidpack cv flat.bin packed.bin
+          ./skidpack d  packed.bin  unpacked.bin
+          cmp flat.bin unpacked.bin
+          echo "Huffman round trip on flat histogram: OK"
+
+          # Highly compressible input reaches the run and sequence paths that
+          # varied data never does.
+          yes "AAAABBBBCCCCDDDD" | head -c 100000 > repetitive.bin
+          ./skidpack c repetitive.bin packed2.bin
+          ./skidpack d packed2.bin unpacked2.bin
+          cmp repetitive.bin unpacked2.bin
+          echo "RLE+Huffman round trip on repetitive: OK"
+
+          # A restricted alphabet leaves byte values free to serve as escapes
+          # while the data still varies, which is what the game's resources look
+          # like and what escape derivation is tuned for.
+          awk 'BEGIN{a="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ";s=7;
+               for(i=0;i<100000;i++){s=(s*25173+13849)%65536;printf "%s",substr(a,(int(s/256)%63)+1,1)}}' > textish.bin
+          ./skidpack c textish.bin packed3.bin
+          ./skidpack d packed3.bin unpacked3.bin
+          cmp textish.bin unpacked3.bin
+          echo "RLE+Huffman round trip on restricted alphabet: OK"
+
+          ./skidpack verify packed3.bin
+
+          # Escapes are derived from byte values occurring ten times or fewer.
+          # A flat histogram has none, so container compression must refuse
+          # rather than write something it cannot read back. This asserts the
+          # refusal, because a previous version of this file asserted the
+          # opposite and was wrong.
+          if ./skidpack c flat.bin nope.bin 2>/dev/null; then
+            echo "expected 'c' to refuse flat-histogram input, but it succeeded"
+            exit 1
+          fi
+          echo "container compression refuses incompressible input: OK"
+
+  freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and test on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          run: |
+            export LC_ALL=C
+            cc -std=c90 -pedantic-errors -Wall -Wextra -O2 -o skidpack src/*.c
+            awk 'BEGIN{s=1;for(i=0;i<100000;i++){s=(s*25173+13849)%65536;printf "%c",int(s/256)%256}}' > flat.bin
+            ./skidpack cv flat.bin packed.bin
+            ./skidpack d packed.bin unpacked.bin
+            cmp flat.bin unpacked.bin
+            yes "AAAABBBBCCCCDDDD" | head -c 100000 > repetitive.bin
+            ./skidpack c repetitive.bin packed2.bin
+            ./skidpack d packed2.bin unpacked2.bin
+            cmp repetitive.bin unpacked2.bin
+            echo "FreeBSD round trip: OK"
+
+  # p and u, on a shape resource built here rather than shipped here. The corpus
+  # proves the codec against 314 real files, but it needs game data nobody can
+  # put in a public repository, so it cannot run on a runner. This can: a 2D
+  # shape container is a header, an offset table and a bitmap, and 46 bytes of
+  # structure around 20000 bytes of pattern is enough to exercise both modes and
+  # the check that stands between a modder and a silently corrupted car.
+  modpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: cc -std=c89 -pedantic -Wall -Wextra -O2 -o skidpack src/*.c
+
+      - name: Pack, unpack and refuse
+        run: |
+          set -e
+          export LC_ALL=C
+
+          # A one-shape 2D container. file_get_shape2d reads the count at offset
+          # 4, then an id table and an offset table of four bytes each, and puts
+          # shape data at count*8+6. The shape header is struct SHAPE2D: width,
+          # height, four unknowns, then unk3..unk6 as bytes. The high nibble of
+          # unk5 is the flip flag, which is the whole point of the second file.
+          gen() {
+            awk -v flip="$1" 'BEGIN{
+              w=200; h=100; n=w*h; total=14+16+n;
+              printf "%c%c%c%c", total%256, int(total/256)%256, int(total/65536)%256, 0;
+              printf "%c%c", 1, 0;
+              printf "%c%c%c%c", 0,0,0,0;
+              printf "%c%c%c%c", 0,0,0,0;
+              printf "%c%c%c%c", w%256, int(w/256), h%256, int(h/256);
+              printf "%c%c%c%c%c%c%c%c", 0,0,0,0,0,0,0,0;
+              printf "%c%c", 0, 0;
+              printf "%c%c", flip*16, 0;
+              for(i=0;i<n;i++) printf "%c", (int(i/64)%7)+65;
+            }'
+          }
+
+          gen 0 > SHAPE.VSH
+          cp SHAPE.VSH SHAPE.orig
+
+          ./skidpack p SHAPE.VSH
+          test -f SHAPE.PVS
+          test "$(wc -c < SHAPE.PVS)" -lt "$(wc -c < SHAPE.orig)"
+
+          # The plain file has to go first: u leaves an existing twin alone,
+          # so with it still there the round trip would prove nothing.
+          rm SHAPE.VSH
+          ./skidpack u SHAPE.PVS
+          cmp SHAPE.VSH SHAPE.orig
+          echo "VSH round trip: OK"
+
+          # .3SH pairs with .P3S through file_load_binary against file_decomp,
+          # with no unflip on either side, so it is the unconditional case.
+          cp SHAPE.orig SOLID.3SH
+          ./skidpack p SOLID.3SH
+          test -f SOLID.P3S
+          rm SOLID.3SH
+          ./skidpack u SOLID.P3S
+          cmp SOLID.3SH SHAPE.orig
+          echo "3SH round trip: OK"
+
+          # Same bytes with the flip nibble set. Packing this would hand the
+          # game a file it transposes and the author never did, which draws as
+          # garbage rather than failing, so it must be refused and nothing
+          # written.
+          gen 1 > FLIP.VSH
+          ./skidpack p FLIP.VSH | tee flip.log
+          test ! -f FLIP.PVS
+          grep -q "FLIPFLAG SET" flip.log
+          grep -q "^FLIPFLAG : 1" flip.log
+          echo "flip refusal: OK"
+
+          # Nothing to do, and it has to say so rather than inventing work.
+          : > EMPTY.RES
+          ./skidpack p EMPTY.RES | grep -q "^SKIPPED  : 1"
+          echo "no packed form: OK"
