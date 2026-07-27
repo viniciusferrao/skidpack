@@ -14,6 +14,16 @@ skidpack: $(OBJ)
 $(OBJ): src/skidpack.h src/version.h src/cli.h src/sdtitl.h src/modpack.h \
         src/glob.h
 
+# Check against the recorded corpus. DIR holds one directory per release, named
+# st10, st11, 4d90 and 4d91:
+#   make check DIR=/path/to/releases
+check: skidpack
+	@cd test && $(CC) $(CFLAGS) -o corpus corpus.c && ./corpus check ../skidpack "$(DIR)"
+
+# Round-trip a directory with no manifest entry, trying both dialects.
+#   make sweep DIR=/path/to/stunts
+sweep: skidpack
+	@cd test && $(CC) $(CFLAGS) -o corpus corpus.c && ./corpus sweep ../skidpack "$(DIR)"/*
 
 # Apply the house style. CLANG_FORMAT lets you point at a pinned build; CI uses
 # clang-format-22 and the config is written against that major.
