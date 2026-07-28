@@ -152,14 +152,25 @@ jobs:
           fi
           file README.TXT
 
-      # LICENSE is not optional: MIT asks that the notice travel with every
-      # copy, and a binary is a copy.
+      # The licence in a form the machine the archive is for can read. LICENSE
+      # itself is UTF-8 with LF, so TYPE renders it as one run-on line with two
+      # broken glyphs in the author's name. The rule asserts the result is
+      # seven-bit ASCII and fails the release if it is not.
+      - name: Generate LICENSE.TXT
+        run: |
+          set -e
+          make LICENSE.TXT
+          head -3 LICENSE.TXT | cat -v
+          file LICENSE.TXT
+
+      # The notice is not optional: MIT asks that it travel with every copy,
+      # and a binary is a copy.
       - name: Assemble
         run: |
           set -e
           mkdir -p stage/dos stage/win32
-          cp LICENSE README.TXT stage/dos/
-          cp LICENSE README.TXT stage/win32/
+          cp LICENSE.TXT README.TXT stage/dos/
+          cp LICENSE.TXT README.TXT stage/win32/
           cp bin/dos/skidpack.exe   stage/dos/SKIDPACK.EXE
           cp bin/dos32/skidpack.exe stage/dos/SKID386.EXE
           cp bin/win32/skidpack.exe stage/win32/skidpack.exe
@@ -172,9 +183,9 @@ jobs:
           # two downloads. SKIDPACK.EXE runs on anything; SKID386.EXE wants a
           # 386 and carries its own extender.
           (cd stage/dos   && zip -X -9 "../../${{ steps.v.outputs.doszip }}" \
-                                LICENSE README.TXT SKIDPACK.EXE SKID386.EXE)
+                                LICENSE.TXT README.TXT SKIDPACK.EXE SKID386.EXE)
           (cd stage/win32 && zip -X -9 "../../${{ steps.v.outputs.winzip }}" \
-                                LICENSE README.TXT skidpack.exe)
+                                LICENSE.TXT README.TXT skidpack.exe)
           sha256sum "${{ steps.v.outputs.doszip }}" "${{ steps.v.outputs.winzip }}" \
             > SHA256SUMS
 

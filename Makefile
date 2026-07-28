@@ -51,7 +51,26 @@ lint:
 README.TXT: README.md tools/txtify.awk
 	awk -f tools/txtify.awk README.md | sed 's/$$/\r/' > $@
 
+# The licence, in the form a DOS machine can actually read. LICENSE itself is
+# UTF-8 with LF, which TYPE renders as one run-on line with two broken glyphs
+# in the middle of the author's name, because a byte above 7Eh is drawn by
+# whatever code page the machine booted with and 437, 850 and 860 disagree
+# about exactly those letters. The repository keeps the accented spelling; only
+# the copy going into an archive is converted.
+#
+# The check is the part that matters. The table only knows the letters this
+# project uses, so a letter it has never seen must stop a release rather than
+# ship as the mojibake the whole thing exists to prevent.
+LICENSE.TXT: LICENSE tools/asciify.sed
+	sed -f tools/asciify.sed LICENSE | sed 's/$$/\r/' > $@
+	@if LC_ALL=C tr -d '\r\n' < $@ | LC_ALL=C grep -q '[^ -~]'; then \
+	  echo "$@ still has bytes a DOS code page would mangle:" >&2; \
+	  LC_ALL=C grep -n '[^ -~]' $@ >&2; rm -f $@; exit 1; \
+	fi
+	@echo "$@ is seven-bit ASCII with CRLF"
+
 clean:
-	rm -f $(OBJ) skidpack skidpack.exe README.TXT test/corpus test/corpus.exe
+	rm -f $(OBJ) skidpack skidpack.exe README.TXT LICENSE.TXT \
+	      test/corpus test/corpus.exe
 
 .PHONY: check sweep format lint clean
