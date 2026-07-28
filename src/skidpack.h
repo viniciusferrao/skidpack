@@ -155,11 +155,18 @@ int     rs_put24(rs_buf *b, rs_size v);
  * Nothing in the file records which dialect it uses, so rs_decomp takes a
  * starting guess and retries with the other order when a pass yields something
  * that cannot be right.
+ *
+ * rs_decomp_as does not retry: the dialect passed is the dialect used. A
+ * caller that is measuring the dialects rather than merely reading the file
+ * needs that, since a silent retry means the result it holds can have come
+ * from the order it did not ask for.
  */
 int rs_vle_decode(rs_cbytep src, rs_size srclen, int bitorder, rs_buf *out);
 int rs_rle_decode(rs_cbytep src, rs_size srclen, rs_buf *out);
 int rs_decomp(rs_cbytep src, rs_size srclen, int stop_after, int bitorder,
               rs_buf *out);
+int rs_decomp_as(rs_cbytep src, rs_size srclen, int stop_after, int bitorder,
+                 rs_buf *out);
 
 /* Read a Huffman pass header: per-symbol code lengths from the stored
  * per-depth counts and alphabet, plus where the code stream starts. Shared by

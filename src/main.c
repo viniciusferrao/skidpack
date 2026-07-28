@@ -51,19 +51,48 @@ static int read_file(const char *path, rs_buf *b)
     return (b->err || ioerr) ? -1 : 0;
 }
 
-/* The sibling temporary a write goes through, in the target's own directory so
- * the rename that follows cannot cross a device. 8.3, because DOS. */
-static void temp_beside(const char *path, char *out)
+/* Whether the caller is allowed to replace what is already at the target. The
+ * single-file modes name their own output and may; bulk mode must not, and its
+ * refusal has to survive the file appearing after the check that found it
+ * absent. */
+#define SK_WRITE_REPLACE 0
+#define SK_WRITE_KEEP 1
+
+/* Defined further down, beside the twin naming it exists for. Declared here
+ * because the temporary has to be probed for absence the same way. */
+static int file_exists(const char *path);
+
+/* An unused sibling temporary, in the target's own directory so the rename
+ * that follows cannot cross a device, and 8.3 because DOS.
+ *
+ * The name is probed rather than fixed. A fixed one was opened with "wb",
+ * which truncates whatever it lands on: a stray SKIDPACK.TMP belonging to
+ * somebody else was destroyed before the rename, which is precisely the
+ * promise this function exists to keep. Probing also lets two runs share a
+ * directory, though it is not a lock and two processes reaching the same free
+ * name at the same instant would still collide.
+ *
+ * Returns 0, or -1 when the path will not fit or a thousand names are taken. */
+static int temp_beside(const char *path, char *out, size_t cap)
 {
     const char *cut = NULL, *p;
     size_t      dlen;
+    int         i;
 
     for (p = path; *p; ++p)
         if (*p == '\\' || *p == '/' || *p == ':') cut = p;
 
     dlen = cut ? (size_t)(cut - path) + 1 : 0;
+    /* 12 for SKIDPnnn.TMP and one for the terminator. Unchecked, a long
+     * enough directory wrote past the end of the caller's buffer. */
+    if (dlen + 13 > cap) return -1;
     if (dlen) memcpy(out, path, dlen);
-    strcpy(out + dlen, "SKIDPACK.TMP");
+
+    for (i = 0; i < 1000; ++i) {
+        sprintf(out + dlen, "SKIDP%03d.TMP", i);
+        if (!file_exists(out)) return 0;
+    }
+    return -1;
 }
 
 /* Written to a sibling and renamed into place, rather than opened over the
@@ -75,7 +104,7 @@ static void temp_beside(const char *path, char *out)
  * sticks. A crash earlier in this tool's life left a zero-byte twin exactly
  * that way. Full disks, floppies and removable media make it ordinary rather
  * than exotic. */
-static int write_file(const char *path, rs_cbytep p, rs_size n)
+static int write_file(const char *path, rs_cbytep p, rs_size n, int policy)
 {
     static char tmp[SK_MODPACK_PATHMAX];
     FILE       *f;
@@ -85,7 +114,7 @@ static int write_file(const char *path, rs_cbytep p, rs_size n)
         return -1;
     }
 
-    temp_beside(path, tmp);
+    if (temp_beside(path, tmp, sizeof(tmp))) return -1;
     f = fopen(tmp, "wb");
     if (!f) return -1;
 
@@ -104,11 +133,23 @@ static int write_file(const char *path, rs_cbytep p, rs_size n)
         return -1;
     }
 
-    /* POSIX rename replaces an existing target; DOS and Windows refuse. The
-     * single-file modes are allowed to overwrite what the caller named, so
-     * clear the way and retry there. Bulk mode never reaches the second
-     * attempt, having already established the twin does not exist. */
+    /* Checked again here, not only by the caller. Bulk mode establishes the
+     * twin is absent before it starts reading and compressing, and a file can
+     * appear in between; POSIX rename would then replace it silently. */
+    if (policy == SK_WRITE_KEEP && file_exists(path)) {
+        remove(tmp);
+        return -1;
+    }
+
+    /* POSIX rename replaces an existing target; DOS and Windows refuse. Only a
+     * caller that asked to replace gets the target cleared and a second
+     * attempt. Under SK_WRITE_KEEP a failure stays a failure, so nothing this
+     * function did not create is ever removed. */
     if (rename(tmp, path) != 0) {
+        if (policy != SK_WRITE_REPLACE) {
+            remove(tmp);
+            return -1;
+        }
         remove(path);
         if (rename(tmp, path) != 0) {
             remove(tmp);
@@ -136,6 +177,14 @@ static int write_file(const char *path, rs_cbytep p, rs_size n)
  * Both dialects are scored rather than stopping at the first that reaches
  * zero, so a file that reads equally well either way is reported as ambiguous
  * instead of being assigned a dialect by loop order.
+ *
+ * rs_decomp_as rather than rs_decomp, because rs_decomp retries under the
+ * opposite bit order when the first attempt fails. That is right for reading a
+ * file and wrong for measuring one: on a multipass container a wrong guess dies
+ * at the next pass header and the retry succeeds, so this loop scored the
+ * second order twice and named whichever iteration it was in. The report then
+ * said MSB-first on the strength of an LSB-first decode. Here each order has to
+ * carry the file on its own.
  */
 static int do_verify(const options *o, const rs_buf *in)
 {
@@ -148,7 +197,7 @@ static int do_verify(const options *o, const rs_buf *in)
         rs_buf stage;
         int    order = ord ? RS_VLE_LSB : RS_VLE_MSB;
         rs_buf_init(&stage);
-        if (!rs_decomp(in->data, in->len, 1, order, &stage)) {
+        if (!rs_decomp_as(in->data, in->len, 1, order, &stage)) {
             decoded = 1;
             if (!rs_vle_inversions(in->data + sp, in->len - sp, stage.data,
                                    stage.len, &invs, &expected)) {
@@ -319,6 +368,11 @@ static unsigned long saved_pct(rs_size plain, rs_size packed)
     return (unsigned long)(((plain - packed) * 100 + plain / 2) / plain);
 }
 
+/* How long an extension this will enumerate the cases of. Every extension the
+ * format uses is three characters, and the cost doubles per character, so four
+ * is a ceiling with room in it rather than a limit anything meets. */
+#define SK_EXT_MAXCASE 4
+
 /* Whether a twin is already there, allowing for the host disagreeing with DOS
  * about case.
  *
@@ -328,16 +382,23 @@ static unsigned long saved_pct(rs_size plain, rs_size packed)
  * twin beside it would be a separate file here and the same file once the
  * directory reaches DOS, where one silently becomes the other.
  *
+ * Every spelling of the extension is tried, not just the all-lowercase one.
+ * Trying only that covered two of the eight ways to write three letters, so
+ * CASE.Pvs sat there unseen while the check claimed to be case blind. Eight
+ * opens settle a three-character extension.
+ *
  * Only the extension is varied. The stem is copied from the source name
  * verbatim, so a stem that differs in case belongs to a different source file
- * and is not this twin. That leaves the exhaustive answer, reading the
- * directory and comparing every entry case blind, unimplemented; no published
- * car needs it, since all of them spell the packed extension in capitals. */
+ * and is not this twin. That leaves the exhaustive answer, reading the whole
+ * directory and comparing every entry case blind, unimplemented: it needs a
+ * directory API under -std=c90 -pedantic-errors on five compilers, two of them
+ * from 1988, and it would answer a question no published car asks. */
 static int file_exists(const char *path)
 {
     static char alt[SK_MODPACK_PATHMAX];
     FILE       *f = fopen(path, "rb");
-    size_t      i, n;
+    size_t      i, n, ext, extlen;
+    unsigned    mask, combos;
 
     if (f) {
         fclose(f);
@@ -354,10 +415,24 @@ static int file_exists(const char *path)
     }
     if (i == 0) return 0;
 
-    for (; alt[i]; ++i)
-        if (alt[i] >= 'A' && alt[i] <= 'Z') alt[i] = (char)(alt[i] + 32);
+    ext = i;
+    extlen = n - ext;
+    if (extlen == 0 || extlen > SK_EXT_MAXCASE) return 0;
 
-    f = fopen(alt, "rb");
+    /* Bit k of mask says whether extension character k is uppercase. The
+     * spelling the caller passed is among the combinations and is tried again,
+     * one wasted open in exchange for a loop with no special case in it. */
+    combos = 1u << extlen;
+    for (mask = 0; mask < combos; ++mask) {
+        for (i = 0; i < extlen; ++i) {
+            char c = path[ext + i];
+            if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+            if ((mask & (1u << i)) && c >= 'a' && c <= 'z') c = (char)(c - 32);
+            alt[ext + i] = c;
+        }
+        f = fopen(alt, "rb");
+        if (f) break;
+    }
     if (!f) return 0;
     fclose(f);
     return 1;
@@ -540,7 +615,7 @@ static int do_bulk(const options *o, int unpacking)
             }
         }
 
-        if (write_file(twin, out.data, out.len)) {
+        if (write_file(twin, out.data, out.len, SK_WRITE_KEEP)) {
             printf("%-12s %9s %9s %6s  WRITE ERROR\n", path, "-", "-", "-");
             ++failed;
             goto next;
@@ -550,8 +625,18 @@ static int do_bulk(const options *o, int unpacking)
          * thing: what the resource weighs plain, and what it weighs packed. */
         plain = (unsigned long)(unpacking ? out.len : in.len);
         packed = (unsigned long)(unpacking ? in.len : out.len);
-        printf("%-12s %9lu %9lu %5lu%%  %s\n", path, plain, packed,
-               saved_pct(plain, packed), twin);
+
+        /* A word rather than 0%, because they are not the same news. Packing
+         * refuses to write a larger twin and says STORED, but unpacking has no
+         * say: a container that occupies more than the resource it carries is a
+         * real thing to meet, and printing 0% for it says the two forms are the
+         * same size when the packed one is bigger. */
+        if (packed >= plain)
+            printf("%-12s %9lu %9lu %6s  %s\n", path, plain, packed, "LARGER",
+                   twin);
+        else
+            printf("%-12s %9lu %9lu %5lu%%  %s\n", path, plain, packed,
+                   saved_pct(plain, packed), twin);
         tot_plain += plain;
         tot_packed += packed;
         /* Off the plain form either way: that is the data the loader unflips,
@@ -612,12 +697,21 @@ static int do_bulk(const options *o, int unpacking)
     if (stored)
         puts("STORED: packing would enlarge the file, so the plain one was "
              "kept.");
+    /* Shortened to fit. At 81 characters this wrapped on the 80-column screen
+     * the rest of the report is laid out for, which on a 25-line DOS display
+     * costs a line of the report above it. */
     if (flipped)
-        puts("FLIPFLAG: a shape is marked for transposing; the two forms are "
-             "not the same data.");
-    if (invalid)
-        puts("INVALID: the file did not read as a shape resource, so it was "
-             "left alone.");
+        puts("FLIPFLAG: a shape is marked for transposing, so the two forms "
+             "differ.");
+    /* Two causes, and the wording used to name only one. A container that
+     * decodes to nothing counts here as well, and .P3S reaches that branch
+     * without any shape ever being parsed, so "did not read as a shape
+     * resource" described a check that file never underwent. Two lines because
+     * both causes will not fit on one inside 80 columns. */
+    if (invalid) {
+        puts("INVALID: the file decoded to nothing, or its shape header will");
+        puts("         not parse. Either way it was left alone.");
+    }
 
     return failed ? 1 : 0;
 }
@@ -653,10 +747,11 @@ int main(int argc, char **argv)
         fputs(SK_BANNER "\n", stderr);
         fprintf(stderr,
                 "usage:\n"
-                "  %s MODE FILE... [options]\n\n"
+                "  %s p|u FILE... [options]\n"
+                "  %s v FILE [options]\n\n"
                 "help:\n"
                 "  %s %s\n",
-                prog, prog, SK_HELP_FLAG);
+                prog, prog, prog, SK_HELP_FLAG);
         return 2;
     }
     if (sk_parse_args(argc, argv, &o)) {
@@ -740,7 +835,7 @@ int main(int argc, char **argv)
         goto done;
     }
 
-    if (write_file(o.out, out.data, out.len)) {
+    if (write_file(o.out, out.data, out.len, SK_WRITE_REPLACE)) {
         fprintf(stderr, "skidpack: cannot write %s\n", o.out);
         goto done;
     }

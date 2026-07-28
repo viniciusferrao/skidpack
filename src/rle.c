@@ -104,11 +104,19 @@ int rs_rle_decode(rs_cbytep src, rs_size srclen, rs_buf *out)
     if (!skipseq && esclen < 2) return -1;
     if ((rs_size)(9 + esclen) > srclen) return -1;
 
+    /* The sequence body's own length, checked here rather than where it is
+     * read. It is the last header field that can be judged without decoding
+     * anything, and a body running past the end of the file is damage, not an
+     * instruction to shorten it. Subtraction so q + seqlen cannot wrap. */
+    if (!skipseq && seqlen > srclen - (rs_size)(9 + esclen)) return -1;
+
     /* Every field is checked before this point, deliberately. outlen is a
      * 24-bit number the header supplies and nothing else has vouched for, so
      * reserving on it first means a header that fails validation one line
      * later can still ask for 16 MB - which a 16-bit host answers by
-     * exhausting its far heap. */
+     * exhausting its far heap. That is why the check above was hoisted out of
+     * the sequence pass: ten bytes declaring a 16 MB output and a body longer
+     * than the file used to allocate before the second number was read. */
     rs_buf_reserve(out, outlen); /* the header states the size; use it */
     if (out->err) return -1;     /* no point decoding into a dead buffer */
 
@@ -133,13 +141,7 @@ int rs_rle_decode(rs_cbytep src, rs_size srclen, rs_buf *out)
     if (!skipseq) {
         unsigned char d = esc[RS_RLE_ESCSEQ_POS];
         q = (rs_size)(9 + esclen);
-
-        /* Refuse a body that runs past the end rather than quietly shortening
-         * it to fit: a header disagreeing with the file is damage, not an
-         * instruction. Subtraction so q + seqlen cannot wrap. */
-        if (seqlen > srclen - q) goto done;
-
-        end = q + seqlen;
+        end = q + seqlen; /* bounded above, before the reserve */
         while (q < end) {
             unsigned char c = src[q++];
             if (c == d) {
@@ -587,12 +589,12 @@ done:
     return rc;
 }
 
-int rs_decomp(rs_cbytep src, rs_size srclen, int stop_after, int bitorder,
-              rs_buf *out)
+int rs_decomp_as(rs_cbytep src, rs_size srclen, int stop_after, int bitorder,
+                 rs_buf *out)
 {
     rs_size final_len = 0;
     int     check_len;
-    int     total_passes, passes_to_run, sp, order, tries, wrapped = 0;
+    int     total_passes, passes_to_run, sp, wrapped = 0;
 
     if (srclen < 5) return -1;
 
@@ -623,38 +625,47 @@ int rs_decomp(rs_cbytep src, rs_size srclen, int stop_after, int bitorder,
      * since then the result is an intermediate stage, not the final output. */
     check_len = wrapped && passes_to_run == total_passes;
 
-    /* Dialect selection.
-     *
-     * Nothing in the file records the payload bit order, so it is settled by
-     * trying one and seeing whether the file survives it.
-     *
-     * Surviving used to mean the next pass header looked sane. That is a
-     * filter, not a proof: a wrong guess yields arbitrary bytes, and arbitrary
-     * bytes sometimes begin with a well formed header. Worse, the choice was
-     * remade independently at every pass, so a file could be accepted under a
-     * mixed reading no encoder would ever have produced, and a later pass
-     * failing to decode condemned the whole file rather than casting doubt on
-     * the guess that led there. Now one order is fixed for the file and has to
-     * carry it to the end, every pass actually decoding.
-     *
-     * What this does NOT buy is a check on the last pass. A wrong dialect
-     * produces exactly the length that pass's own header states - only the
-     * contents are nonsense - so neither the wrapper's final size nor anything
-     * else in the container disagrees with it. On a single-pass file there is
-     * therefore still nothing to test and the caller's choice stands, which is
-     * what -target is for. The length check catches a damaged wrapper, not a
-     * dialect.
-     *
-     * The cost is a second attempt when the first guess is wrong, and it is
-     * small: a wrong guess almost always dies on the very next pass header,
-     * before any real work. Peak memory is unchanged, since a failed attempt is
-     * released in full before the next one starts.
-     */
-    order = bitorder;
+    return decomp_chain(src, srclen, sp, total_passes, passes_to_run, bitorder,
+                        check_len, final_len, out);
+}
+
+/* Dialect selection.
+ *
+ * Nothing in the file records the payload bit order, so it is settled by
+ * trying one and seeing whether the file survives it.
+ *
+ * Surviving used to mean the next pass header looked sane. That is a filter,
+ * not a proof: a wrong guess yields arbitrary bytes, and arbitrary bytes
+ * sometimes begin with a well formed header. Worse, the choice was remade
+ * independently at every pass, so a file could be accepted under a mixed
+ * reading no encoder would ever have produced, and a later pass failing to
+ * decode condemned the whole file rather than casting doubt on the guess that
+ * led there. Now one order is fixed for the file and has to carry it to the
+ * end, every pass actually decoding.
+ *
+ * What this does NOT buy is a check on the last pass. A wrong dialect produces
+ * exactly the length that pass's own header states - only the contents are
+ * nonsense - so neither the wrapper's final size nor anything else in the
+ * container disagrees with it. On a single-pass file there is therefore still
+ * nothing to test and the caller's choice stands, which is what -target is
+ * for. The length check catches a damaged wrapper, not a dialect.
+ *
+ * The cost is a second attempt when the first guess is wrong, and it is small:
+ * a wrong guess almost always dies on the very next pass header, before any
+ * real work. Peak memory is unchanged, since a failed attempt is released in
+ * full before the next one starts.
+ *
+ * The retry is why rs_decomp_as exists beside this. Success here says the file
+ * decoded; it does not say under which order, and a caller reporting the
+ * dialect needs to be the one holding that answer.
+ */
+int rs_decomp(rs_cbytep src, rs_size srclen, int stop_after, int bitorder,
+              rs_buf *out)
+{
+    int order = bitorder, tries;
+
     for (tries = 0; tries < 2; ++tries) {
-        if (!decomp_chain(src, srclen, sp, total_passes, passes_to_run, order,
-                          check_len, final_len, out))
-            return 0;
+        if (!rs_decomp_as(src, srclen, stop_after, order, out)) return 0;
         order = (order == RS_VLE_MSB) ? RS_VLE_LSB : RS_VLE_MSB;
     }
     return -1;
