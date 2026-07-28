@@ -114,9 +114,10 @@ int rs_rle_decode(rs_cbytep src, rs_size srclen, rs_buf *out)
      * 24-bit number the header supplies and nothing else has vouched for, so
      * reserving on it first means a header that fails validation one line
      * later can still ask for 16 MB - which a 16-bit host answers by
-     * exhausting its far heap. That is why the check above was hoisted out of
-     * the sequence pass: ten bytes declaring a 16 MB output and a body longer
-     * than the file used to allocate before the second number was read. */
+     * exhausting its far heap. The sequence body is bounded above rather than
+     * where it is read for the same reason: eleven bytes can declare a 16 MB
+     * output and a body longer than the whole file, and both numbers have to
+     * be disbelieved before either is acted on. */
     rs_buf_reserve(out, outlen); /* the header states the size; use it */
     if (out->err) return -1;     /* no point decoding into a dead buffer */
 

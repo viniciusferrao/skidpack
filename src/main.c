@@ -186,6 +186,38 @@ static int write_file(const char *path, rs_cbytep p, rs_size n, int policy)
  * said MSB-first on the strength of an LSB-first decode. Here each order has to
  * carry the file on its own.
  */
+/* What the packed form of this file costs the game to load, reported alongside
+ * the integrity check.
+ *
+ * The number already existed but only fell out of `p` and `u`, and `u` prints
+ * it only on a file it actually unpacks. So the one question a modder has about
+ * a car that already ships packed, what it costs to load, could only be
+ * answered by unpacking it and reading the report off the side of an operation
+ * they did not want, leaving a plain twin three times the size behind. `v`
+ * touches nothing, which makes it the right place to ask.
+ *
+ * Decompressed a second time rather than reusing the dialect probe above: that
+ * one stops after a single pass to get at the Huffman stage, and the shape
+ * container this measures is what the last pass produces. A file is small
+ * enough that running it twice costs nothing worth saving.
+ *
+ * Silent when the extension has no packed twin, since a loader module or a
+ * sound resource has no unflip pass and no scratch to report. */
+static void report_scratch(const options *o, const rs_buf *in, int order)
+{
+    static char plain[SK_MODPACK_PATHMAX];
+    rs_buf      full;
+    int         kind = SK_UNFLIP_NONE;
+
+    if (!sk_modpack_source(o->in, plain, &kind)) return;
+
+    rs_buf_init(&full);
+    if (!rs_decomp_as(in->data, in->len, 0, order, &full) && !full.err)
+        printf("%s: %lu bytes of scratch to load\n", o->in,
+               (unsigned long)sk_modpack_scratch(full.data, full.len, kind));
+    rs_buf_free(&full);
+}
+
 static int do_verify(const options *o, const rs_buf *in)
 {
     rs_size sp = (in->data[0] & 0x80) ? 4 : 0;
@@ -254,6 +286,11 @@ static int do_verify(const options *o, const rs_buf *in)
     else
         printf("%s: OK - tree consistent with its payload (%s)\n", o->in,
                bestOrder == RS_VLE_LSB ? "LSB-first" : "MSB-first");
+
+    /* Only on a file that verified, and with the dialect this run settled on.
+     * A number measured off a corrupt or truncated container, or off a guess at
+     * the bit order, describes bytes nobody should be acting on. */
+    report_scratch(o, in, bestOrder);
     return 0;
 }
 
@@ -399,9 +436,13 @@ static unsigned long saved_pct(rs_size plain, rs_size packed)
  * same file once the directory reaches DOS, where one silently becomes the
  * other.
  *
- * Windows keeps the check even though NTFS is case blind by default, because a
- * directory can be marked otherwise and WSL marks them; it costs nothing on
- * that hardware. DOS does not keep it, for the reason above.
+ * Windows keeps the check even though NTFS is case blind by default, because it
+ * is not unconditionally so: a directory can carry a per-directory
+ * case-sensitivity attribute, and some reached through WSL do. Whether any
+ * given one does depends on the WSL version, the mount, inheritance and how the
+ * directory was made, which is precisely why this asks the filesystem rather
+ * than reasoning about it. It costs nothing on that hardware. DOS does not keep
+ * the check, for the reason above.
  *
  * Every spelling of the extension is tried, not just the all-lowercase one.
  * Trying only that covered two of the eight ways to write three letters, so

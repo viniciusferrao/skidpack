@@ -235,7 +235,7 @@ void sk_usage(FILE *out, const char *prog, int advanced)
         fputs("modes:\n"
               "  p   pack, write the packed twin of each file given\n"
               "  u   unpack, write the plain twin of each file given\n"
-              "  v   verify one container against its own Huffman tree\n\n",
+              "  v   verify one container, and say what it costs to load\n\n",
               out);
 
 #if SK_DOS_SWITCHES
