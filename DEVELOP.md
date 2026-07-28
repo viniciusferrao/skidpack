@@ -15,78 +15,83 @@ What you need to work on the code. [README.md](README.md) covers using it.
 | GCC | builds in CI, and runs cppcheck and `-fanalyzer` |
 | Clang | builds in CI, and runs the address and UB sanitizers |
 
-The four DOS compilers are not redundant. Turbo C reaches the allocator
-through `farmalloc` where Microsoft C uses `halloc`, and Watcom's strict
-ANSI mode hides the unreserved spellings of `huge` and `stricmp`, so only
-the reserved ones survive it. The 32-bit target has no huge pointers at
-all, which is what keeps the `M_I86` guards in `buf.c` honest. `EGA.CMN`
-below explains why any of that exists.
+We use a variety of compilers to aim for maximum compatibility. We know
+Microsoft C was used to develop the game. Turbo C was famous at the time
+as the cheap alternative. And Watcom is what we have today that is free to
+use and reasonably maintained.
 
-The goal is period-correct software. `skidpack` is a recreation, built
-from what could be worked out about a tool that never left Distinctive
+They also differ in how the memory allocator works, which lets us stress
+different paths and keep the older systems honest.
+
+Concretely: Turbo C reaches the allocator through `farmalloc` where
+Microsoft C uses `halloc`, and Watcom's strict ANSI mode hides the
+unreserved spellings of `huge` and `stricmp`, so only the reserved ones
+survive it. The 32-bit target has no huge pointers at all, which is what
+keeps the `M_I86` guards in `buf.c` honest, and it is a useful place to
+start if you are reading this code for the first time. `EGA.CMN` below
+explains why any of it exists.
+
+What we are after is period-correct software. `skidpack` is a recreation,
+built from what we could work out about a tool that never left Distinctive
 Software, and keeping these compilers building is what lets it run on a
 machine of the era.
 
-## Traps
+## Traps found during development
 
-**Turbo C miscompiles a source file with Unix line endings.** It emits a
-nearly empty object, reports nothing, and the failure surfaces much later
-as a pile of undefined externals at link time.
-[`.gitattributes`](.gitattributes) stores the sources LF, so a fresh
-checkout needs converting before `TCBUILD` will work:
+**Turbo C does not support Unix line endings (LF).** This is generally not
+an issue, because [`.gitattributes`](.gitattributes) checks the C sources
+out CRLF, but be advised. DOS is the primary target and Turbo C is the only
+compiler here with this issue.
 
-    unix2dos src/*.c src/*.h test/corpus.c
+If you do want or need LF in your working tree, you must use `dos2unix` or
+similar to convert locally.
 
-Without `unix2dos`, either of these does the same job:
+## Code formatting
 
-    sed -i 's/$/\r/' src/*.c src/*.h test/corpus.c    # on a Unix host
-    perl -pi -e 's/\n/\r\n/' src/*.c src/*.h test/corpus.c
+CI runs clang-format and commits the result, so an unformatted push is
+automatically cleaned up. Run it yourself if you would rather not have your
+tree go out of sync:
 
-Only Turbo C cares. The other compilers read LF perfectly well, so
-convert a copy rather than the tree if you build with more than one.
-
-**Run the formatter before pushing; CI treats it as blocking.** The
-version is pinned because clang-format's defaults move between majors,
-and a mismatch reformats the tree the day the runner image changes. Point
-`CLANG_FORMAT` at a matching build, or call it directly:
-
-    clang-format --dry-run --Werror --style=file src/*.c src/*.h
+    make format
 
 ## Testing
 
     make check DIR=/path/to/releases    # verify against the manifest
     make sweep DIR=/path/to/releases    # round-trip anything, no manifest
 
-`DIR` holds one directory per release, named `st10`, `st11`, `4d90` and
-`4d91`, or a single unpacked release. Releases you leave out are counted
-as absent and the run still succeeds.
+The `DIR` variable holds one directory per release, named `st10`, `st11`,
+`4d90` and `4d91`, or a single unpacked release. That way you can test
+against every release at once, which may be more than you want, or against
+one of them, such as `st11`, whose dialect is the default `bb11`. Releases
+you leave out are counted as absent and the run still succeeds.
 
 `check` verifies every row of [`test/corpus.txt`](test/corpus.txt) end to
 end: the shipped file matches its recorded CRC-32, unpacks to the
 recorded CRC-32, and repacks to the shipped bytes. The manifest also
-records the mode, dialect and flags each file needs.
+records the mode, dialect and flags each file needs, and those are checked
+too.
 
 `sweep` needs no manifest and tries both dialects and both modes. Use it
 on a release the manifest does not cover.
 
-[`test/corpus.c`](test/corpus.c) is C89, so the tests run on DOS too
-rather than having to be driven from a modern host. The batch files do
-not build it unless asked, because someone who wants the tool should not
-wait for the checker:
+[`test/corpus.c`](test/corpus.c) is plain C89 code, so the tests run on
+DOS too rather than having to be driven from a modern host. The batch
+files do not build it by default, because someone who wants the tool
+should not have to wait for the checker. Ask for it explicitly:
 
     MSCBUILD CORPUS
     TCBUILD CORPUS
     WCLBUILD CORPUS
     WCLBUILD 386 CORPUS
 
-The makefile already works that way; `make` builds the packer and `make
-check` builds the driver.
+The same applies to the Unix-like builds. The makefile already works that
+way: `make` builds the packer and `make check` builds the driver.
 
-CI builds a shape container of its own and runs `p` and `u` over it,
-which covers both directions and the refusal that keeps a mod from being
-packed into something the game would transpose.
+CI builds a shape container of its own and runs `p` (packing) and `u`
+(unpacking) over it, which covers both directions and the refusal that
+keeps a mod from being packed into something the game would transpose.
 
-## What packing costs the game
+## What packing costs the game (be ready for the technicalities)
 
 A packed 2D shape is unflipped after it is decompressed, into a scratch
 buffer. A plain one takes the `file_load_binary` path and allocates
@@ -103,8 +108,8 @@ then allocates `paragraphs * 16` bytes. The cost is the biggest single
 shape rounded up to a paragraph, plus two paragraphs of slack, and not
 the size of the file or the number of shapes in it. A container of many
 small shapes costs nothing extra; one oversized dashboard sets the cost
-for the whole file. That is 22432 bytes for a stock dashboard and 43552
-for the widest mod one measured.
+for the whole file. That is 22432 bytes for a stock dashboard, and a mod
+one drawn larger can run to roughly twice that.
 
 `.PES` measures nothing. The loader asks for a flat 1000 paragraphs,
 16000 bytes, whatever the file holds. A tiny `.ESH` and a large one cost
@@ -116,21 +121,28 @@ never holds two at once. `p` therefore reports the largest single
 allocation a run would provoke rather than the total of all of them,
 which would describe a volume nothing has to satisfy at one time.
 
-`mmgr_alloc_pages` evicts chunks to make room and the game holds 50 of
-them, so once those buffers push demand past what fits, something still
-in use is dropped and the next screen to touch it dies with `memory
-manager - BLOCK NOT FOUND`.
+`v` reports the same figure for a single file and writes nothing, which is
+how you ask a car that already ships packed:
+
+    skidpack v STDACOUN.PVS
+
+    STDACOUN.PVS: OK - tree consistent with its payload (MSB-first)
+    STDACOUN.PVS: 22432 bytes of scratch to load
+
+`u` prints the figure too, but only for a file it actually unpacks, so it
+says nothing when the plain twin is already there, and nothing for a
+dashboard it refuses over the flip flag.
 
 ### What is actually known
 
-That the buffer exists and how it is sized. Whether it ever overflows is
-not known.
+We know the buffer exists and how it is sized. Whether it ever overflows,
+we do not know yet.
 
 A packed mod car loads, draws, races against an opponent, and reaches the
-results screen. It has also been played for minutes at a time without
+results screen. We have also played one for minutes at a time without
 complaint. In those runs it was stable.
 
-## The case of `EGA.CMN`: it will not fit in a segment
+## The curious case of `EGA.CMN`:
 
 `EGA.CMN` is the reason this codebase looks the way it does on a 16-bit
 host.
@@ -140,8 +152,6 @@ It is 147456 bytes unpacked in Stunts 1.0, and `SDOSEL.PVS` unpacks past
 the output buffer can be addressed by a plain `far` pointer, whose offset
 wraps at 64 KB and silently starts overwriting the beginning of its own
 segment.
-
-What follows from that is not a matter of style.
 
 `rs_size` is `unsigned long` rather than `size_t`. On a 16-bit host
 `size_t` is 16 bits, so every length and offset in the codec would wrap
@@ -167,27 +177,69 @@ those the address space is flat, there is nothing to normalise, and
 32-bit DOS build stops compiling, which is the reason one is in the
 matrix.
 
-A modern host reaches none of this. `RS_HUGE` expands to nothing,
-`rs_size` is merely a wide integer, and the whole chapter is invisible.
-It only exists because one 147456-byte file shipped in the original
-release.
+If you only ever build on a modern host you reach none of this. `RS_HUGE`
+expands to nothing, `rs_size` is merely a wide integer, and the whole
+chapter is invisible. It only exists because one 147456-byte file shipped
+in the original release.
 
 ## Format
 
-The container and tree layout are based on the [Stunts
+We based the container and tree layout on the [Stunts
 wiki](https://wiki.stunts.hu/wiki/Compression). What it does not cover,
-the RLE escape table and how a packer chooses one, is described in the
-code comments.
+the RLE escape table and how a packer chooses one, we describe in the code
+comments.
 
-Two things the wiki gets differently. The maximum Huffman depth is 15 and
-not 16: the game's level-offset accumulator is an `unsigned short`, and
-at depth 16 the bound it compares against wraps to zero. And the packed
-and plain forms of a 2D shape are not always the same bytes, because the
-packed loader runs an unflip pass that the plain one does not.
+Two things differ from the Wiki. The maximum Huffman depth is actually 15
+and not 16: the game's level-offset accumulator is an `unsigned short`, and
+at depth 16 the bound it compares against wraps to zero. Much like the
+classic joke about arrays starting at 0. And the packed and plain forms of
+a 2D shape are not always the same bytes, because the packed loader runs an
+unflip pass that the plain one does not.
+
+### `.XVS` support
+
+The loader probes extensions in order, and `.XVS` is not used by anything
+that ships:
+
+    .PVS  decompress, allocate scratch, unflip, return
+    .XVS  decompress, return
+    .VSH  load plain, return
+
+`.XVS` is a compressed `.VSH`. It takes the same container `.PVS` does and
+skips both the unflip pass and the buffer that pass needs, so it compresses
+exactly as well while allocating nothing.
+
+The string table
+
+    .PVS\0.XVS\0.VSH\0
+
+appears byte for byte in all sixteen code overlays, four video modes across
+four releases, `.XVS` always ahead of `.VSH`. Decompress `CGA.COD`,
+`EGA.COD`, `MCGA.COD` and `TDY.COD` and look for yourself.
+
+It works in the game, tested in MCGA on cars whose dashboards were present
+only as `.XVS`. They render correctly and cost no scratch at all.
+
+`p` writes `.PVS` anyway, because that is what published mods use. If you
+change that, `.XVS` is wrong for a shape claiming a flip, since nothing
+would transpose it, so the check guarding `.PVS` guards this too. And not
+every video mode and release pairing has been tried in the game.
+
+### No published modded car supports the pre-VGA video modes
+
+A dashboard is a container of named resources, four characters each,
+readable at offset 6:
+
+    !cg0 !eg0 dash gbox inm1 inm3 ins1 ins2 ins3 roof whl1 whl2 whl3
+
+`!cg0` and `!eg0` are 256-entry tables that convert the artwork down for
+CGA and EGA. MCGA reads the artwork directly and needs neither. Stock cars
+carry tables cut for their own picture. Of all the modded cars we tested,
+none shipped support for EGA or the older modes. A tool to convert them
+automatically could be made, but that is an enhancement for another update.
 
 ### Why a `.VSH` or `.ESH` is sometimes refused
 
-That unflip pass is the reason `p` will not always pack a 2D shape.
 `file_unflip_shape2d` transposes a shape whose header asks for it, and it
 runs only on the packed path. So for a shape marked that way the plain
 bytes and the packed bytes are not the same picture, and packing it would
@@ -200,7 +252,7 @@ the container and the file is skipped when any shape in it claims a flip.
 `SK_VERSION` in [`src/version.h`](src/version.h) is the only place a
 version appears. The banner reads it, and so does `/V`.
 
-Binaries are built with Open Watcom and only with Open Watcom. It is the
+We build the binaries with Open Watcom and only with Open Watcom. It is the
 one toolchain here whose licence allows shipping what it produces.
 
     WCLBUILD          16-bit DOS   runs on anything, needs nothing
@@ -215,12 +267,11 @@ the contents with
 
     PKUNZIP -T SKIDPK10.ZIP
 
-### All three binaries reproduce, one of them with help
+### All binaries are reproducible build
 
 Both DOS builds are byte for byte reproducible on their own.
 
 Watcom fills in a `TimeDateStamp` on a Win32 executable. It sits at
 offset 8 from the PE signature, which is itself found through `e_lfanew`
-at `0x3C`, and it is the only thing separating two builds of one commit.
-The release post-processes the linker's output to zero those four bytes,
-which makes the third binary reproducible too.
+at `0x3C`. We zero it after linking, which makes that build deterministic
+too.

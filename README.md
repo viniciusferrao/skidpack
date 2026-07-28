@@ -18,7 +18,7 @@ with the option `--sdtitl`.
 
 `skidpack` is able to generate every one of those 314 files byte for byte.
 It also checks a file's Huffman tree against the data that tree
-encodes, which catches an eventual bit rot that unpacking alone does not.
+encodes, which catches bit rot that unpacking alone would not.
 
 ## Use
 
@@ -66,15 +66,19 @@ Community developed cars can be downloaded from the
 ### What it costs
 
 Packing is not quite free. The game unpacks a 2D shape through a scratch
-buffer that it never allocates for a plain one, so a packed car asks for a
-little more memory at load time. The buffer is freed again straight away, so
-what matters is the largest one a run would ask for, and `p` reports that as
-`SCRATCH`.
+buffer that a plain one does not need, so a packed car asks for more memory
+while it loads. Each buffer is freed as soon as its shape is unflipped, so
+what costs you is the largest single one, and `p` reports that as `SCRATCH`.
 
-Whether that is ever enough to matter is not known. Two attempts to find a
-limit both measured a broken test setup rather than the game, and the crashes
-they produced happen just as readily with nothing packed at all. See
-[DEVELOP.md](DEVELOP.md) if you want that story.
+You can also ask a file that is already packed, without unpacking it:
+
+    skidpack v STDACOUN.PVS
+
+    STDACOUN.PVS: OK - tree consistent with its payload (MSB-first)
+    STDACOUN.PVS: 22432 bytes of scratch to load
+
+For more information check the "What is actually known" part of
+[DEVELOP.md](DEVELOP.md).
 
 ## Build
 
