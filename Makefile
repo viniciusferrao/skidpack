@@ -30,17 +30,17 @@ sweep: skidpack
 CLANG_FORMAT ?= clang-format
 
 format:
-	$(CLANG_FORMAT) -i --style=file src/*.c src/*.h
+	$(CLANG_FORMAT) -i --style=file src/*.c src/*.h test/corpus.c
 
 format-check:
-	$(CLANG_FORMAT) --dry-run --Werror --style=file src/*.c src/*.h
+	$(CLANG_FORMAT) --dry-run --Werror --style=file src/*.c src/*.h test/corpus.c
 
 # What CI runs. Needs cppcheck; the analyzer needs GCC 10 or newer.
 lint:
 	cppcheck --std=c89 --enable=warning,performance,portability \
 	         --inline-suppr --error-exitcode=1 \
-	         --suppress=missingIncludeSystem src/
-	@for f in $(SRC); do \
+	         --suppress=missingIncludeSystem src/ test/corpus.c
+	@for f in $(SRC) test/corpus.c; do \
 	  $(CC) -std=c90 -pedantic-errors -Wall -Wextra -Wshadow -Wcast-qual \
 	        -Wstrict-prototypes -Wmissing-prototypes -Wwrite-strings \
 	        -fanalyzer -O2 -c $$f -o /dev/null || exit 1; \

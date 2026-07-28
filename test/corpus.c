@@ -366,7 +366,7 @@ static int do_check(int argc, char **argv)
     const char   *sk, *root, *manifest;
     FILE         *mf;
     unsigned long size;
-    long          total = 0, ok = 0, absent = 0, bad = 0;
+    long          total = 0, ok = 0, absent = 0, bad = 0, lineno = 0;
 
     sk = argv[2];
     root = argv[3];
@@ -384,12 +384,23 @@ static int do_check(int argc, char **argv)
     strcpy(rep, "corprep.tmp");
 
     while (fgets(line, sizeof(line), mf)) {
-        const char *rel, *name, *mode, *target, *bug, *pcrc, *rcrc;
-        int         n;
+        const char   *rel, *name, *mode, *target, *bug, *pcrc, *rcrc;
+        unsigned long psize, rsize;
+        char         *end;
+        int           n;
+        ++lineno;
         if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
 
+        /* A row that does not parse is a fault in the manifest, not a row to
+         * pass over. Skipping it quietly loses a file from the count while the
+         * run still reports success. */
         n = split_fields(line, field, 12);
-        if (n < 9) continue;
+        if (n != 9) {
+            fprintf(stderr, "%s:%ld: expected 9 fields, found %d\n", manifest,
+                    lineno, n);
+            ++bad;
+            continue;
+        }
         ++total;
 
         /* rel file mode target bug packed raw pkd_crc32 raw_crc32 */
@@ -400,6 +411,21 @@ static int do_check(int argc, char **argv)
         bug = field[4];
         pcrc = field[7];
         rcrc = field[8];
+
+        psize = strtoul(field[5], &end, 10);
+        if (*end) {
+            fprintf(stderr, "%s:%ld: packed size is not a number: %s\n",
+                    manifest, lineno, field[5]);
+            ++bad;
+            continue;
+        }
+        rsize = strtoul(field[6], &end, 10);
+        if (*end) {
+            fprintf(stderr, "%s:%ld: raw size is not a number: %s\n", manifest,
+                    lineno, field[6]);
+            ++bad;
+            continue;
+        }
 
         /* The manifest describes <root>/<release>/<file>, which is how you
          * check several releases at once. Failing that, try <root>/<file>, so
@@ -419,14 +445,30 @@ static int do_check(int argc, char **argv)
                 ++bad;
                 continue;
             }
+            if (size != psize) {
+                printf("%s/%s: shipped file is %lu bytes, manifest says %lu\n",
+                       rel, name, size, psize);
+                ++bad;
+                continue;
+            }
         } else {
             join2(src, root, name);
             if (hash_file(src, hex, &size) != 0 || strcmp(hex, pcrc) != 0) {
                 ++absent;
                 continue;
             }
+            if (size != psize) {
+                ++absent;
+                continue;
+            }
         }
 
+        /* Removed before the child runs, not after. system() does not reliably
+         * carry the child's exit status on DOS, which sweep_one already works
+         * around; here a failed child could leave the previous row's output in
+         * place and the hash below would be taken from it. Releases share many
+         * byte-identical resources, so a stale file can match. */
+        remove(raw);
         if (run(sk, "d", src, raw, target, 0) != 0) {
             printf("%s/%s: decompression failed\n", rel, name);
             ++bad;
@@ -439,7 +481,14 @@ static int do_check(int argc, char **argv)
             ++bad;
             continue;
         }
+        if (size != rsize) {
+            printf("%s/%s: decompressed to %lu bytes, manifest says %lu\n", rel,
+                   name, size, rsize);
+            ++bad;
+            continue;
+        }
 
+        remove(rep);
         if (run(sk, mode, raw, rep, target, strcmp(bug, "-") != 0) != 0) {
             printf("%s/%s: repack failed\n", rel, name);
             ++bad;
@@ -453,7 +502,16 @@ static int do_check(int argc, char **argv)
         }
         ++ok;
     }
-    fclose(mf);
+    /* A read error stops fgets exactly like end of file does, so without this
+     * a truncated read would report however many rows it managed as a pass. */
+    if (ferror(mf)) {
+        fprintf(stderr, "corpus: error reading %s\n", manifest);
+        ++bad;
+    }
+    if (fclose(mf) != 0) {
+        fprintf(stderr, "corpus: error closing %s\n", manifest);
+        ++bad;
+    }
     remove(raw);
     remove(rep);
 
