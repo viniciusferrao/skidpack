@@ -6,12 +6,17 @@ releases byte for byte, and packs mod shapes the game already knows how to load.
 
 | file | for |
 |---|---|
-| `SKIDPK10.ZIP` | MS-DOS. `SKIDPACK.EXE` runs on anything; `SKID386.EXE` wants a 386 and carries its own extender. |
+| `SKIDPK10.ZIP` | MS-DOS. `SKIDPACK.EXE` runs on anything; `SKIDPK32.EXE` wants a 386 and carries its own extender. |
 | `skidpack-1.0-win32.zip` | Windows 95 and later, from the command prompt. |
 
 Both are built with Open Watcom 1.9, whose licence plainly allows shipping what
 it produces. No Unix binary: `make` with any C89 compiler, and there is nothing
 to configure.
+
+`SKIDPK32.EXE` also has the DOS/32A extender linked into it, which is what
+lets one file run on a 386 with nothing else installed. This product uses
+DOS/32 Advanced DOS Extender technology. Its copyright notice, conditions and
+disclaimer are in `DOS32A.TXT` inside the DOS archive.
 
 ### Packing a mod
 

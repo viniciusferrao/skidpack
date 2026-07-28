@@ -22,5 +22,8 @@
 # lone LF.
 *.bat text eol=crlf
 
+# The DOS/32A licence, shipped in the DOS archive and read there.
+DOS32A.TXT text eol=crlf
+
 # The manifest is space-aligned text; keep its line endings stable.
 test/corpus.txt text eol=lf

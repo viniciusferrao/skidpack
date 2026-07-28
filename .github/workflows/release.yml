@@ -1,11 +1,12 @@
 name: release
 
-# Builds the two shipped binaries, generates README.TXT and packages both
-# archives. Push a tag to publish; run it by hand to rehearse without publishing.
+# Builds the three shipped binaries, generates README.TXT and LICENSE.TXT and
+# packages both archives. Push a tag to publish; run it by hand to rehearse
+# without publishing.
 #
 # The build runs on Windows rather than Linux so it goes through WCLBUILD.BAT,
 # the same script README.md tells a reader to run. Open Watcom is cross-hosted
-# and a Linux runner could reach the same two targets by calling wcl directly,
+# and a Linux runner could reach the same three targets by calling wcl directly,
 # but that is a second build path, and a second build path drifts from the
 # documented one exactly the way a second README drifts from the first.
 on:
@@ -17,9 +18,9 @@ permissions:
   contents: write
 
 jobs:
-  # Both targets come from one source tree and one batch file, so the only
-  # difference between these two is the argument. 16-bit DOS needs nothing to
-  # run; Win32 imports KERNEL32 and USER32, so Windows 95 on.
+  # All three targets come from one source tree and one batch file, so the only
+  # difference between them is the argument. 16-bit DOS needs nothing to run;
+  # Win32 imports KERNEL32 and USER32, so Windows 95 on.
   binary:
     strategy:
       fail-fast: false
@@ -167,27 +168,47 @@ jobs:
           head -3 LICENSE.TXT | cat -v
           file LICENSE.TXT
 
-      # The notice is not optional: MIT asks that it travel with every copy,
-      # and a binary is a copy.
+          # DOS/32A is linked into the 32-bit build as its stub, and its licence
+          # asks for the notice in the documentation and this sentence in the
+          # end-user documentation, word for word. Asserted here because a
+          # wording change upstream, or somebody tidying README.md, would
+          # otherwise remove an obligation silently.
+          #
+          # The strings are from the licence Open Watcom 1.9 ships, the Liberty
+          # Edition. A later DOS/32A carries a different title and a different
+          # copyright holder, so do not swap these for the ones in that text
+          # without swapping DOS32A.TXT to match.
+          grep -Fq "DOS/32 Advanced DOS Extender Liberty Edition Software License" DOS32A.TXT
+          grep -Fq "Copyright (C) 1996-2002 Supernar Systems, Ltd." DOS32A.TXT
+          grep -Fq "This product uses DOS/32 Advanced DOS Extender technology." DOS32A.TXT
+          grep -Fq "This product uses DOS/32 Advanced DOS Extender technology." README.TXT
+          echo "DOS/32A licence and acknowledgment present: OK"
+
+      # The notices are not optional. MIT asks that its own travel with every
+      # copy, and a binary is a copy; DOS/32A asks the same of the extender
+      # linked into the 32-bit build, so DOS32A.TXT goes in the DOS archive
+      # only. The Win32 executable has no extender in it.
       - name: Assemble
         run: |
           set -e
           mkdir -p stage/dos stage/win32
-          cp LICENSE.TXT README.TXT stage/dos/
+          cp LICENSE.TXT README.TXT DOS32A.TXT stage/dos/
           cp LICENSE.TXT README.TXT stage/win32/
           cp bin/dos/skidpack.exe   stage/dos/SKIDPACK.EXE
-          cp bin/dos32/skidpack.exe stage/dos/SKID386.EXE
+          cp bin/dos32/skidpack.exe stage/dos/SKIDPK32.EXE
           cp bin/win32/skidpack.exe stage/win32/skidpack.exe
-          chmod +x stage/dos/SKIDPACK.EXE stage/dos/SKID386.EXE \
+          chmod +x stage/dos/SKIDPACK.EXE stage/dos/SKIDPK32.EXE \
                    stage/win32/skidpack.exe
 
           # One DOS archive with both builds rather than two archives. Naming a
           # second one inside 8.3 while keeping the version in it does not work,
           # and a DOS reader would rather choose between two files than between
-          # two downloads. SKIDPACK.EXE runs on anything; SKID386.EXE wants a
-          # 386 and carries its own extender.
+          # two downloads. SKIDPACK.EXE runs on anything; SKIDPK32.EXE wants a
+          # 386 and carries its own extender. Both share the SKIDPK the archive
+          # name already uses, so they read as one product.
           (cd stage/dos   && zip -X -9 "../../${{ steps.v.outputs.doszip }}" \
-                                LICENSE.TXT README.TXT SKIDPACK.EXE SKID386.EXE)
+                                LICENSE.TXT DOS32A.TXT README.TXT \
+                                SKIDPACK.EXE SKIDPK32.EXE)
           (cd stage/win32 && zip -X -9 "../../${{ steps.v.outputs.winzip }}" \
                                 LICENSE.TXT README.TXT skidpack.exe)
           sha256sum "${{ steps.v.outputs.doszip }}" "${{ steps.v.outputs.winzip }}" \
@@ -205,6 +226,20 @@ jobs:
           unzip -t "${{ steps.v.outputs.winzip }}"
           unzip -l "${{ steps.v.outputs.doszip }}"
           unzip -l "${{ steps.v.outputs.winzip }}"
+
+          # Read back out of the archive rather than off the staging directory,
+          # so what is asserted is what a reader downloads.
+          unzip -l "${{ steps.v.outputs.doszip }}" | grep -q DOS32A.TXT
+          unzip -p "${{ steps.v.outputs.doszip }}" DOS32A.TXT \
+            | grep -Fq "DOS/32 Advanced DOS Extender Liberty Edition Software License"
+          unzip -p "${{ steps.v.outputs.doszip }}" README.TXT \
+            | grep -Fq "This product uses DOS/32 Advanced DOS Extender technology."
+          # And that it is not in the Win32 archive, which has no extender.
+          if unzip -l "${{ steps.v.outputs.winzip }}" | grep -q DOS32A.TXT; then
+            echo "DOS32A.TXT does not belong in the Win32 archive" >&2; exit 1
+          fi
+          echo "DOS/32A notices are in the DOS archive and only there: OK"
+
           cat SHA256SUMS
 
       - uses: actions/upload-artifact@v7

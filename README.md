@@ -138,3 +138,14 @@ modifications. Without them there would be no reason to develop `skidpack`.
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
+
+### Third-party software
+
+`SKIDPK32.EXE` has the DOS/32A extender linked into it as its stub, which is
+what lets one file run on a 386 with nothing else installed.
+
+This product uses DOS/32 Advanced DOS Extender technology.
+
+Its copyright notice, conditions and disclaimer are in `DOS32A.TXT`, which
+ships inside the DOS archive. `SKIDPACK.EXE` and the Win32 build do not
+include it.
