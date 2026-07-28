@@ -1,0 +1,216 @@
+name: release
+
+# Builds the two shipped binaries, generates README.TXT and packages both
+# archives. Push a tag to publish; run it by hand to rehearse without publishing.
+#
+# The build runs on Windows rather than Linux so it goes through WCLBUILD.BAT,
+# the same script README.md tells a reader to run. Open Watcom is cross-hosted
+# and a Linux runner could reach the same two targets by calling wcl directly,
+# but that is a second build path, and a second build path drifts from the
+# documented one exactly the way a second README drifts from the first.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # Both targets come from one source tree and one batch file, so the only
+  # difference between these two is the argument. 16-bit DOS needs nothing to
+  # run; Win32 imports KERNEL32 and USER32, so Windows 95 on.
+  binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: dos
+            arg: ''
+            watcom: dos
+          - target: dos32
+            arg: '386'
+            watcom: dos
+          - target: win32
+            arg: WIN32
+            watcom: nt
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: open-watcom/setup-watcom@v1
+        with:
+          version: '1.9'
+          target: ${{ matrix.watcom }}
+
+      # WCLBUILD reads WATCOM, which the action above exported, and writes
+      # skidpack.exe whatever the target. It stays spelled that way here: the
+      # DOS archive wants SKIDPACK.EXE, but renaming on a case-insensitive
+      # filesystem is a rename onto itself, so that happens in the Linux job.
+      - name: Build
+        shell: cmd
+        run: |
+          call WCLBUILD.BAT ${{ matrix.arg }}
+          if not exist skidpack.exe exit /b 1
+
+      - name: Report
+        shell: bash
+        run: ls -l skidpack.exe && sha256sum skidpack.exe
+
+      # The Win32 one can be exercised here. The DOS one cannot: the runner has
+      # no DOS. Its proof is the corpus, which needs game data no public repo can
+      # hold, so it is checked before a release rather than during one.
+      - name: Smoke test
+        if: matrix.target == 'win32'
+        shell: bash
+        run: |
+          set -e
+          export LC_ALL=C
+          ./skidpack.exe /? > /dev/null
+          awk 'BEGIN{s=1;for(i=0;i<60000;i++){s=(s*25173+13849)%65536;printf "%c",int(s/256)%256}}' > flat.bin
+          ./skidpack.exe cv flat.bin packed.bin
+          ./skidpack.exe d packed.bin unpacked.bin
+          cmp flat.bin unpacked.bin
+          echo "win32 round trip: OK"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: skidpack.exe
+          if-no-files-found: error
+
+  package:
+    needs: binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with: { name: dos,   path: bin/dos }
+      - uses: actions/download-artifact@v8
+        with: { name: dos32, path: bin/dos32 }
+      - uses: actions/download-artifact@v8
+        with: { name: win32, path: bin/win32 }
+
+      # Watcom stamps the PE header with the build clock, which is the only
+      # thing that stops two builds of one commit being the same file. Zero it,
+      # and the Win32 binary becomes reproducible like the two DOS ones, which
+      # have no such field to stamp. The loader does not read it for an ordinary
+      # executable; it matters to bound imports and debuggers, neither of which
+      # is in play here.
+      - name: Make the Win32 build reproducible
+        run: |
+          set -e
+          f=bin/win32/skidpack.exe
+          before=$(sha256sum "$f" | cut -c1-16)
+          # e_lfanew is a little-endian uint32 at 0x3C; TimeDateStamp follows
+          # the 4-byte PE signature and 4 bytes of machine/section count.
+          lfa=$(od -An -tu4 -j60 -N4 "$f" | tr -d ' ')
+          stamp=$(od -An -tu4 -j $((lfa + 8)) -N4 "$f" | tr -d ' ')
+          printf '\0\0\0\0' | dd of="$f" bs=1 seek=$((lfa + 8)) conv=notrunc status=none
+          after=$(od -An -tu4 -j $((lfa + 8)) -N4 "$f" | tr -d ' ')
+          [ "$after" = "0" ] || { echo "timestamp not cleared"; exit 1; }
+          echo "PE TimeDateStamp $stamp -> 0 at offset $((lfa + 8))"
+          echo "sha256 $before... -> $(sha256sum "$f" | cut -c1-16)..."
+
+      # SK_VERSION is the only place a version is written, so a tag that
+      # disagrees with it would ship a binary printing the other number. Catch
+      # that here rather than in a bug report.
+      - name: Version
+        id: v
+        run: |
+          set -e
+          VER=$(sed -n 's/^#define SK_VERSION "\(.*\)"/\1/p' src/version.h)
+          [ -n "$VER" ] || { echo "no SK_VERSION in src/version.h"; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG=${GITHUB_REF_NAME#v}
+            [ "$TAG" = "$VER" ] || {
+              echo "tag v$TAG disagrees with SK_VERSION $VER in src/version.h"; exit 1; }
+          fi
+          # SKIDPK10.ZIP, from 1.0. DOS wants 8.3, and a version long enough to
+          # break it should say so here rather than ship an unopenable name.
+          DOSZIP="SKIDPK$(echo "$VER" | tr -d .)"
+          [ ${#DOSZIP} -le 8 ] || { echo "$DOSZIP exceeds 8.3"; exit 1; }
+          echo "ver=$VER"            >> "$GITHUB_OUTPUT"
+          echo "doszip=$DOSZIP.ZIP"  >> "$GITHUB_OUTPUT"
+          echo "winzip=skidpack-$VER-win32.zip" >> "$GITHUB_OUTPUT"
+
+      # The whole reason this job exists. Generated from README.md at the tagged
+      # commit, so the text a release ships cannot lag the text it documents.
+      - name: Generate README.TXT
+        run: |
+          set -e
+          make README.TXT
+          # EDIT.COM reads 78 columns. Assert it, because the failure is silent:
+          # a long line wraps and the file merely looks bad on the machine that
+          # nobody building the release is using.
+          if sed 's/\r$//' README.TXT | awk 'length>78{exit 1}'; then
+            echo "README.TXT fits 78 columns: OK"
+          else
+            echo "README.TXT has lines past 78 columns:" >&2
+            sed 's/\r$//' README.TXT | awk 'length>78{printf "  %d (%d): %s\n", NR, length, $0}' >&2
+            exit 1
+          fi
+          file README.TXT
+
+      # LICENSE is not optional: MIT asks that the notice travel with every
+      # copy, and a binary is a copy.
+      - name: Assemble
+        run: |
+          set -e
+          mkdir -p stage/dos stage/win32
+          cp LICENSE README.TXT stage/dos/
+          cp LICENSE README.TXT stage/win32/
+          cp bin/dos/skidpack.exe   stage/dos/SKIDPACK.EXE
+          cp bin/dos32/skidpack.exe stage/dos/SKID386.EXE
+          cp bin/win32/skidpack.exe stage/win32/skidpack.exe
+          chmod +x stage/dos/SKIDPACK.EXE stage/dos/SKID386.EXE \
+                   stage/win32/skidpack.exe
+
+          # One DOS archive with both builds rather than two archives. Naming a
+          # second one inside 8.3 while keeping the version in it does not work,
+          # and a DOS reader would rather choose between two files than between
+          # two downloads. SKIDPACK.EXE runs on anything; SKID386.EXE wants a
+          # 386 and carries its own extender.
+          (cd stage/dos   && zip -X -9 "../../${{ steps.v.outputs.doszip }}" \
+                                LICENSE README.TXT SKIDPACK.EXE SKID386.EXE)
+          (cd stage/win32 && zip -X -9 "../../${{ steps.v.outputs.winzip }}" \
+                                LICENSE README.TXT skidpack.exe)
+          sha256sum "${{ steps.v.outputs.doszip }}" "${{ steps.v.outputs.winzip }}" \
+            > SHA256SUMS
+
+      # Verification comes free twice over: SHA256SUMS for a modern machine, and
+      # the CRC-32 the ZIP format already stores per member, which is the same
+      # one PKZIP shipped in 1989. unzip -t checks the latter, so a reader on DOS
+      # with PKUNZIP -T is checking what was checked here.
+      - name: Verify
+        run: |
+          set -e
+          sha256sum -c SHA256SUMS
+          unzip -t "${{ steps.v.outputs.doszip }}"
+          unzip -t "${{ steps.v.outputs.winzip }}"
+          unzip -l "${{ steps.v.outputs.doszip }}"
+          unzip -l "${{ steps.v.outputs.winzip }}"
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ steps.v.outputs.ver }}
+          path: |
+            ${{ steps.v.outputs.doszip }}
+            ${{ steps.v.outputs.winzip }}
+            SHA256SUMS
+          if-no-files-found: error
+
+      # Only on a tag. A manual run does everything above and stops, which is
+      # what makes it useful as a rehearsal.
+      - name: Publish
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "skidpack ${{ steps.v.outputs.ver }}" \
+            --notes-file .github/RELEASE_NOTES.md \
+            "${{ steps.v.outputs.doszip }}" \
+            "${{ steps.v.outputs.winzip }}" \
+            SHA256SUMS
