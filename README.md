@@ -67,7 +67,9 @@ Community developed cars can be downloaded from the
 
 Packing is not quite free. The game unpacks a 2D shape through a scratch
 buffer that it never allocates for a plain one, so a packed car asks for a
-little more memory at load time. `p` reports that as `SCRATCH`.
+little more memory at load time. The buffer is freed again straight away, so
+what matters is the largest one a run would ask for, and `p` reports that as
+`SCRATCH`.
 
 Whether that is ever enough to matter is not known. Two attempts to find a
 limit both measured a broken test setup rather than the game, and the crashes

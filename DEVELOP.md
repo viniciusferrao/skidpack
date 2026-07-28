@@ -89,25 +89,32 @@ packed into something the game would transpose.
 ## What packing costs the game
 
 A packed 2D shape is unflipped after it is decompressed, into a scratch
-buffer sized from the largest shape in the file. A plain one takes the
-`file_load_binary` path and allocates nothing.
+buffer. A plain one takes the `file_load_binary` path and allocates
+nothing. The two packed 2D forms do not size that buffer the same way,
+and `.P3S` does not unflip at all.
 
-`file_get_unflip_size` walks every shape in the container, reads the
-width and height out of each 16-byte `SHAPE2D` header, and keeps the
-largest of
+`.PVS` measures the file. `file_get_unflip_size` walks every shape in the
+container, reads the width and height out of each 16-byte `SHAPE2D`
+header, and keeps the largest of
 
     paragraphs = (width * height + 0x20) >> 4
 
 then allocates `paragraphs * 16` bytes. The cost is the biggest single
-shape rounded up to a 16-byte paragraph, plus two paragraphs of slack,
-and not the size of the file or the number of shapes in it. A container
-of many small shapes costs nothing extra; one oversized dashboard sets
-the cost for the whole file.
+shape rounded up to a paragraph, plus two paragraphs of slack, and not
+the size of the file or the number of shapes in it. A container of many
+small shapes costs nothing extra; one oversized dashboard sets the cost
+for the whole file. That is 22432 bytes for a stock dashboard and 43552
+for the widest mod one measured.
 
-That is 22432 bytes for a stock dashboard and 43552 for the widest mod
-one measured. `p` prints the same number as `SCRATCH`, computed by
-`sk_modpack_scratch` from the identical formula, so the cost is visible
-before anything is written.
+`.PES` measures nothing. The loader asks for a flat 1000 paragraphs,
+16000 bytes, whatever the file holds. A tiny `.ESH` and a large one cost
+the same, and a small one costs more packed as `.PES` than it would as
+`.PVS`.
+
+Both buffers are released as soon as the shape is unflipped, so the game
+never holds two at once. `p` therefore reports the largest single
+allocation a run would provoke rather than the total of all of them,
+which would describe a volume nothing has to satisfy at one time.
 
 `mmgr_alloc_pages` evicts chunks to make room and the game holds 50 of
 them, so once those buffers push demand past what fits, something still

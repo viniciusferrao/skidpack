@@ -333,7 +333,7 @@ static int file_exists(const char *path)
 static int do_bulk(const options *o, int unpacking)
 {
     static char   twin[SK_MODPACK_PATHMAX];
-    unsigned long tot_plain = 0, tot_packed = 0, tot_scratch = 0;
+    unsigned long tot_plain = 0, tot_packed = 0, peak_scratch = 0;
     int           wrote = 0, nopair = 0, stored = 0, present = 0;
     int           flipped = 0, invalid = 0, failed = 0, f;
     char        **list = o->list;
@@ -475,10 +475,18 @@ static int do_bulk(const options *o, int unpacking)
         tot_plain += plain;
         tot_packed += packed;
         /* Off the plain form either way: that is the data the loader unflips,
-         * and it is what `in` holds when packing and `out` when unpacking. */
-        if (unflips)
-            tot_scratch += (unsigned long)sk_modpack_scratch(
-                unpacking ? out.data : in.data, unpacking ? out.len : in.len);
+         * and it is what `in` holds when packing and `out` when unpacking.
+         *
+         * Kept as the largest rather than the running total, because the game
+         * releases the buffer as soon as it has unflipped the shape. Two packed
+         * resources never hold one at the same time, so a sum would describe an
+         * allocation volume nothing ever has to satisfy at once. */
+        if (unflips) {
+            unsigned long s = (unsigned long)sk_modpack_scratch(
+                unpacking ? out.data : in.data, unpacking ? out.len : in.len,
+                unflips);
+            if (s > peak_scratch) peak_scratch = s;
+        }
         ++wrote;
 
     next:
@@ -491,9 +499,11 @@ static int do_bulk(const options *o, int unpacking)
     printf("FILES    : %d\n", nlist);
     printf("%-8s : %d\n", unpacking ? "UNPACKED" : "PACKED", wrote);
     /* What the packed form costs the game that the plain one does not: the
-     * buffer it unflips each of these in. Reported rather than judged, because
-     * how much a given installation has left is its own question. */
-    if (tot_scratch) printf("SCRATCH  : %lu BYTES\n", tot_scratch);
+     * buffer it unflips a shape in. The largest of them rather than their sum,
+     * because the loader releases each before the next is read, so no two are
+     * ever held at once. Reported rather than judged, because how much a given
+     * installation has left is its own question. */
+    if (peak_scratch) printf("SCRATCH  : %lu BYTES PEAK\n", peak_scratch);
     printf("SKIPPED  : %d\n", nopair);
     if (!unpacking) printf("STORED   : %d\n", stored);
     printf("EXISTS   : %d\n", present);

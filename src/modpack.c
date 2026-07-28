@@ -40,9 +40,9 @@ static const struct {
     const char *packed;
     int         unflips;
 } pairs[] = {
-    { "3SH", "P3S", 0 },
-    { "VSH", "PVS", 1 },
-    { "ESH", "PES", 1 }
+    { "3SH", "P3S", SK_UNFLIP_NONE },
+    { "VSH", "PVS", SK_UNFLIP_PVS  },
+    { "ESH", "PES", SK_UNFLIP_PES  }
 };
 /* clang-format on */
 #define NPAIRS (int)(sizeof(pairs) / sizeof(pairs[0]))
@@ -183,10 +183,16 @@ int sk_modpack_flip_safe(rs_cbytep data, rs_size len)
  * any published car measured comes near that, so the two agree today; this
  * reports the size the buffer ought to be, and a resource that ever crossed the
  * line would be a hazard in the game rather than a disagreement here. */
-rs_size sk_modpack_scratch(rs_cbytep data, rs_size len)
+rs_size sk_modpack_scratch(rs_cbytep data, rs_size len, int kind)
 {
     rs_size  dataofs, most = 0;
     unsigned shapecount, i;
+
+    /* .PES does not measure anything. The loader asks for 1000 paragraphs
+     * whatever the file turns out to hold, so the widest shape in it changes
+     * nothing and the container is never walked. */
+    if (kind == SK_UNFLIP_PES) return SK_UNFLIP_PES_BYTES;
+    if (kind != SK_UNFLIP_PVS) return 0;
 
     if (len < 6) return 0;
 
