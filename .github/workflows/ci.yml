@@ -210,13 +210,21 @@ jobs:
           grep -q "NOT RUN" quoted.log
           echo "a path the driver cannot quote is refused, not mangled: OK"
 
-  # Blocking, because the tree conforms. The version is pinned: clang-format's
-  # options and their defaults change between majors, so an unpinned formatter
-  # reformats the tree the day the runner image moves.
+  # Formatting is applied, not demanded. Failing a build because a brace sat in
+  # the wrong column teaches nobody anything and the fix is mechanical, so CI
+  # makes it rather than asking. The version stays pinned: clang-format's
+  # options and their defaults change between majors, and an unpinned one would
+  # reformat the whole tree the day the runner image moves.
   format:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      # A named branch rather than the detached HEAD a push event checks out by
+      # default, since this job may have to commit.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Install clang-format 22
         run: |
@@ -227,10 +235,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-format-22
 
-      - name: Check formatting
+      - name: Format
+        run: clang-format-22 -i --style=file src/*.c src/*.h test/corpus.c
+
+      # Pushing to someone else's fork is not ours to do, so a pull request
+      # gets the diff printed and nothing else. The branch is tidied when it
+      # lands here.
+      - name: Commit the result
         run: |
-          clang-format-22 --dry-run --Werror --style=file \
-            src/*.c src/*.h test/corpus.c
+          set -e
+          if git diff --quiet; then
+            echo "already formatted, nothing to do"
+            exit 0
+          fi
+          git diff --stat
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "pull request: reformatted above, not pushed from here"
+            exit 0
+          fi
+          git config user.name "skidpack CI"
+          git config user.email "noreply@github.com"
+          git commit -am "style: clang-format"
+          # Rebase first: a push that landed while this job was running would
+          # otherwise be rejected. A failure after that is real and says so
+          # rather than being swallowed.
+          git pull --rebase
+          git push
 
   build:
     strategy:
@@ -386,7 +416,7 @@ jobs:
           # The plain file has to go first: u leaves an existing twin alone,
           # so with it still there the round trip would prove nothing.
           rm SHAPE.VSH
-          ./skidpack u SHAPE.PVS
+          ./skidpack u SHAPE.PVS | tee unpack.log
           cmp SHAPE.VSH SHAPE.orig
           echo "VSH round trip: OK"
 
@@ -415,6 +445,40 @@ jobs:
           : > EMPTY.RES
           ./skidpack p EMPTY.RES | grep -q "^SKIPPED  : 1"
           echo "no packed form: OK"
+
+          # What a packed file costs the game to load, from v, which writes
+          # nothing. Before this the figure only fell out of p and u, and u
+          # prints it only for a file it actually unpacks, so a car that ships
+          # packed could not be asked at all without unpacking it first.
+          #
+          # 200x100 pixels: (200 * 100 + 0x20) >> 4 = 1252 paragraphs of 16.
+          ./skidpack v SHAPE.PVS | tee scratch.log
+          grep -q "20032 bytes of scratch to load" scratch.log
+
+          # The same figure the bulk report gave for the same file, arrived at
+          # down a different path. v decompresses on its own to measure the
+          # container; the unpack above measured what it had already produced.
+          # Asserting one number in two places is what catches the two drifting
+          # apart, which is the failure a reader would never think to check.
+          grep -q "^SCRATCH  : 20032 BYTES PEAK" unpack.log
+          echo "v reports the scratch a .PVS costs, agreeing with u: OK"
+
+          # .P3S has no unflip pass at all, so the honest answer is zero rather
+          # than silence: the reader asked what it costs and it costs nothing.
+          ./skidpack v SOLID.P3S | grep -q "0 bytes of scratch to load"
+          echo "v reports zero for a form that unflips nothing: OK"
+
+          # A container with no packed twin has no unflip path either, and a
+          # scratch figure for one would be meaningless. cv makes a bare
+          # Huffman file under an extension the pairing table does not know.
+          ./skidpack cv SHAPE.orig LOADER.CMN
+          ./skidpack v LOADER.CMN | tee nopair.log
+          grep -q "OK" nopair.log
+          if grep -q "scratch" nopair.log; then
+            echo "expected no scratch line for an unpaired extension" >&2
+            exit 1
+          fi
+          echo "v stays quiet where scratch means nothing: OK"
 
           # A container bigger than the resource it carries. Packing refuses to
           # produce one and says STORED, but unpacking meets them, and the saved
