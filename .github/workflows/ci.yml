@@ -344,16 +344,20 @@ jobs:
           # filesystem is case sensitive, which is the only place the check can
           # be exercised: a Windows or DOS host answers it with one open before
           # the added code is reached.
+          # The stem is copied from the source verbatim, so only the extension
+          # can differ in case for the same twin. CASE.pvs and CASE.PVS are one
+          # file on DOS; case.pvs is a different source's twin and is not this
+          # one's business.
           cp SHAPE.orig CASE.VSH
-          : > case.pvs
+          : > CASE.pvs
           ./skidpack p CASE.VSH | tee case.log
           grep -q "EXISTS" case.log
           test ! -f CASE.PVS
-          test "$(wc -c < case.pvs)" -eq 0
-          echo "lowercase twin treated as existing: OK"
+          test "$(wc -c < CASE.pvs)" -eq 0
+          echo "twin differing only in extension case is seen: OK"
 
           # And with no twin of either spelling, it must still write one.
-          rm -f case.pvs
+          rm -f CASE.pvs
           ./skidpack p CASE.VSH > case2.log
           test -f CASE.PVS
           echo "no twin means write: OK"
