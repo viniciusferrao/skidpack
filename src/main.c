@@ -368,19 +368,40 @@ static unsigned long saved_pct(rs_size plain, rs_size packed)
     return (unsigned long)(((plain - packed) * 100 + plain / 2) / plain);
 }
 
+/* Whether the filesystem underneath can tell CASE.PVS from CASE.pvs.
+ *
+ * DOS cannot. FAT holds names uppercased and matches without regard to case,
+ * so the first open already answers for every spelling and the rest of this
+ * function is dead there: eight guaranteed-failing directory searches per
+ * call, three calls per file in bulk mode, on the slowest storage this tool
+ * will ever meet. It is compiled out rather than skipped, so a 286 does not
+ * load the code either. */
+#if defined(__MSDOS__) || defined(MSDOS) || defined(_MSDOS) || \
+    defined(__TURBOC__)
+#    define SK_CASE_BLIND_FS 1
+#else
+#    define SK_CASE_BLIND_FS 0
+#endif
+
+#if !SK_CASE_BLIND_FS
 /* How long an extension this will enumerate the cases of. Every extension the
  * format uses is three characters, and the cost doubles per character, so four
  * is a ceiling with room in it rather than a limit anything meets. */
-#define SK_EXT_MAXCASE 4
+#    define SK_EXT_MAXCASE 4
+#endif
 
 /* Whether a twin is already there, allowing for the host disagreeing with DOS
  * about case.
  *
- * DOS and Windows settle this themselves: their filesystems are case blind, so
- * one open answers for every spelling. A case-sensitive host does not, and the
- * generated name always carries an uppercase extension. An existing lowercase
- * twin beside it would be a separate file here and the same file once the
- * directory reaches DOS, where one silently becomes the other.
+ * DOS settles this itself, and Windows almost always does. A case-sensitive
+ * host does not, and the generated name always carries an uppercase extension.
+ * An existing lowercase twin beside it would be a separate file there and the
+ * same file once the directory reaches DOS, where one silently becomes the
+ * other.
+ *
+ * Windows keeps the check even though NTFS is case blind by default, because a
+ * directory can be marked otherwise and WSL marks them; it costs nothing on
+ * that hardware. DOS does not keep it, for the reason above.
  *
  * Every spelling of the extension is tried, not just the all-lowercase one.
  * Trying only that covered two of the eight ways to write three letters, so
@@ -395,16 +416,21 @@ static unsigned long saved_pct(rs_size plain, rs_size packed)
  * from 1988, and it would answer a question no published car asks. */
 static int file_exists(const char *path)
 {
+    FILE *f = fopen(path, "rb");
+#if !SK_CASE_BLIND_FS
     static char alt[SK_MODPACK_PATHMAX];
-    FILE       *f = fopen(path, "rb");
     size_t      i, n, ext, extlen;
     unsigned    mask, combos;
+#endif
 
     if (f) {
         fclose(f);
         return 1;
     }
 
+#if SK_CASE_BLIND_FS
+    return 0;
+#else
     n = strlen(path);
     if (n == 0 || n >= sizeof(alt)) return 0;
     strcpy(alt, path);
@@ -436,6 +462,7 @@ static int file_exists(const char *path)
     if (!f) return 0;
     fclose(f);
     return 1;
+#endif
 }
 
 /* Bulk mode, both directions. Each file is judged on its own and a reason is
