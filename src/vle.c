@@ -169,11 +169,19 @@ int rs_vle_decode(rs_cbytep src, rs_size srclen, int bitorder, rs_buf *out)
 
     if (srclen < 6 || src[0] != RS_TYPE_VLE) return -1;
     outlen = rs_size24(src + 1);
-    rs_buf_reserve(out, outlen); /* the header states the size; use it */
     depth = src[4] & 0x7F;
     additive = (src[4] & 0x80) ? 1 : 0;
+
+    /* Validate before reserving, not after. A declared length is 24 bits, so a
+     * six-byte file whose tree is nonsense can ask for close to 16 MB and get
+     * it allocated before anything checks the tree. On a 16-bit host that is
+     * the difference between a refusal and an out-of-memory exit. The RLE side
+     * has always read this way round. */
     if (depth == 0 || depth > RS_VLE_MAX_DEPTH) return -1;
     if (rs_vle_read_tree(src, srclen, len, &codepos)) return -1;
+
+    rs_buf_reserve(out, outlen); /* the header states the size; use it */
+    if (out->err) return -1;
 
     /* counts per length, and the alphabet in canonical order */
     for (w = 0; w <= RS_VLE_MAX_DEPTH + 1; ++w) count[w] = 0;

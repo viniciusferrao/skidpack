@@ -7,7 +7,7 @@ rem build and the 32-bit one disagree about pointers, and compiling both is how
 rem the M_I86 guards in buf.c and skidpack.h stay honest.
 rem
 rem   WCLBUILD          16-bit DOS, large model, the default
-rem   WCLBUILD 386      32-bit DOS under the DOS/4GW extender
+rem   WCLBUILD 386      32-bit DOS, DOS/32A extender built into the exe
 rem   WCLBUILD WIN32    Win32 console
 rem
 rem The last one is spelled WIN32 rather than NT, which is what Watcom calls the

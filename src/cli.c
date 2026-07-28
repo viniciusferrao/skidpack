@@ -222,15 +222,20 @@ void sk_usage(FILE *out, const char *prog, int advanced)
     fputs(SK_BANNER "\n", out);
 
     if (!advanced) {
+        /* Two usage lines because the modes below do not agree on their
+         * arguments: p and u take a list and expand wildcards themselves, and
+         * v takes one container. One line reading MODE FILE... promised the
+         * list to all three. */
         fprintf(out,
                 "usage:\n"
-                "  %s MODE FILE... [options]\n\n",
-                prog);
+                "  %s p|u FILE... [options]\n"
+                "  %s v FILE [options]\n\n",
+                prog, prog);
 
         fputs("modes:\n"
               "  p   pack, write the packed twin of each file given\n"
               "  u   unpack, write the plain twin of each file given\n"
-              "  v   verify each container against its own Huffman tree\n\n",
+              "  v   verify one container against its own Huffman tree\n\n",
               out);
 
 #if SK_DOS_SWITCHES
@@ -386,7 +391,8 @@ static const struct {
      * were the names until the set was made consistent, and refusing them now
      * would only cost somebody a run to discover it. */
     { "verify", SK_MODE_VERIFY, 0, 0 },
-    { "pack",   SK_MODE_PACK,   0, 1 }
+    { "pack",   SK_MODE_PACK,   0, 1 },
+    { "unpack", SK_MODE_UNPACK, 0, 1 }
 };
 /* clang-format on */
 #define NMODES (int)(sizeof(modes) / sizeof(modes[0]))

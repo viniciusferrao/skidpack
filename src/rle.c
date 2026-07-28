@@ -52,15 +52,23 @@ static int next_pass_plausible(rs_cbytep p, rs_size n)
 {
     unsigned esclen;
 
-    if (n < 10) return 0;
+    /* Each pass type gets its own minimum. A shared floor of ten was right for
+     * RLE and too high for Huffman, whose smallest legal pass is eight bytes: a
+     * type, three of declared length, a depth, a count of one, one alphabet
+     * symbol and the flush. No shipped file is that small, so the corpus never
+     * noticed, but a multipass file whose next pass was that shape was refused
+     * during dialect selection. */
+    if (n < 1) return 0;
 
     switch (p[0]) {
     case RS_TYPE_VLE:
+        if (n < 8) return 0;
         esclen = p[4] & 0x7F;
         return esclen >= 1 && esclen <= RS_VLE_MAX_WIDTH &&
                rs_size24(p + 1) > 0 && (rs_size)(5 + esclen) <= n;
 
     case RS_TYPE_RLE:
+        if (n < 10) return 0;
         esclen = p[8] & 0x7F;
         return esclen >= 1 && esclen <= RS_VLE_MAX_WIDTH &&
                rs_size24(p + 1) > 0 && (rs_size)(9 + esclen) <= n &&
