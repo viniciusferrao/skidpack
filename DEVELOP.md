@@ -253,7 +253,7 @@ the container and the file is skipped when any shape in it claims a flip.
 version appears. The banner reads it, and so does `/V`.
 
 We build the binaries with Open Watcom and only with Open Watcom. It is the
-one toolchain here whose licence allows shipping what it produces.
+one toolchain here whose licence allows shipping what it produces for DOS.
 
     WCLBUILD          16-bit DOS   runs on anything, needs nothing
     WCLBUILD 386      32-bit DOS   needs a 386, extender built in
