@@ -265,8 +265,13 @@ static int packs_back(const options *o, const rs_buf *in, const rs_buf *packed)
  * division reports 76 for a file that actually shrank by 75.3, so every
  * inexact line overstated the saving by up to a point and the totals column
  * disagreed with anything that measured the files afterwards. */
+/* Both guards earn their place. plain is zero for a container that decodes to
+ * nothing, which divided by zero here. And packed can exceed plain when a file
+ * decodes smaller than its own packed form, where the subtraction wraps because
+ * rs_size is unsigned and the percentage came out astronomical. */
 static unsigned long saved_pct(rs_size plain, rs_size packed)
 {
+    if (plain == 0 || packed >= plain) return 0;
     return (unsigned long)(((plain - packed) * 100 + plain / 2) / plain);
 }
 
@@ -424,6 +429,17 @@ static int do_bulk(const options *o, int unpacking)
                 ++failed;
                 goto next;
             }
+        }
+
+        /* A container that decodes to nothing is not a resource. The flip check
+         * below would catch it for the 2D pairs, which parse the result, but
+         * .P3S parses nothing and reached the report with a zero-length plain
+         * side. Refused here so every pair is covered by one rule. */
+        if (out.len == 0) {
+            printf("%-12s %9s %9lu %6s  INVALID FORMAT\n", path, "-",
+                   (unsigned long)in.len, "-");
+            ++invalid;
+            goto next;
         }
 
         /* Checked after decompression when unpacking, because the flags live in

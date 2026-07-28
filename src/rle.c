@@ -501,12 +501,16 @@ done:
  * uses `order`: the dialect belongs to whoever wrote the file, so a reading
  * that switches dialect halfway through is not one worth accepting.
  *
- * want_len, when non-zero, is the size the wrapper promises the last pass
- * produces. Returns 0 and hands the result to *out, or -1 having touched
- * nothing.
+ * check_len says whether the wrapper stated a final size at all, and want_len
+ * is that size. They are separate because a wrapper may legitimately promise
+ * zero, and folding the two into one value made a zero promise mean "do not
+ * check", so a file could claim nothing and deliver something.
+ *
+ * Returns 0 and hands the result to *out, or -1 having touched nothing.
  */
 static int decomp_chain(rs_cbytep src, rs_size srclen, int sp, int total,
-                        int run, int order, rs_size want_len, rs_buf *out)
+                        int run, int order, int check_len, rs_size want_len,
+                        rs_buf *out)
 {
     rs_buf    cur, next;
     rs_cbytep cp;
@@ -559,7 +563,7 @@ static int decomp_chain(rs_cbytep src, rs_size srclen, int sp, int total,
         cl = cur.len;
     }
 
-    if (want_len && cur.len != want_len) goto done;
+    if (check_len && cur.len != want_len) goto done;
 
     /* Hand the last stage to the caller rather than copying it. Both callers
      * pass an empty buffer, and copying would hold two full-size results at
@@ -578,7 +582,8 @@ done:
 int rs_decomp(rs_cbytep src, rs_size srclen, int stop_after, int bitorder,
               rs_buf *out)
 {
-    rs_size final_len = 0, want_len;
+    rs_size final_len = 0;
+    int     check_len;
     int     total_passes, passes_to_run, sp, order, tries, wrapped = 0;
 
     if (srclen < 5) return -1;
@@ -608,7 +613,7 @@ int rs_decomp(rs_cbytep src, rs_size srclen, int stop_after, int bitorder,
      * a damaged outer header that would otherwise return a plausible buffer of
      * the wrong length. Not checked when the caller stopped early on purpose,
      * since then the result is an intermediate stage, not the final output. */
-    want_len = (wrapped && passes_to_run == total_passes) ? final_len : 0;
+    check_len = wrapped && passes_to_run == total_passes;
 
     /* Dialect selection.
      *
@@ -629,7 +634,8 @@ int rs_decomp(rs_cbytep src, rs_size srclen, int stop_after, int bitorder,
      * contents are nonsense - so neither the wrapper's final size nor anything
      * else in the container disagrees with it. On a single-pass file there is
      * therefore still nothing to test and the caller's choice stands, which is
-     * what -target is for. want_len catches a damaged wrapper, not a dialect.
+     * what -target is for. The length check catches a damaged wrapper, not a
+     * dialect.
      *
      * The cost is a second attempt when the first guess is wrong, and it is
      * small: a wrong guess almost always dies on the very next pass header,
@@ -639,7 +645,7 @@ int rs_decomp(rs_cbytep src, rs_size srclen, int stop_after, int bitorder,
     order = bitorder;
     for (tries = 0; tries < 2; ++tries) {
         if (!decomp_chain(src, srclen, sp, total_passes, passes_to_run, order,
-                          want_len, out))
+                          check_len, final_len, out))
             return 0;
         order = (order == RS_VLE_MSB) ? RS_VLE_LSB : RS_VLE_MSB;
     }

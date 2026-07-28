@@ -119,6 +119,25 @@ jobs:
                         -e 00,01,00,03,04,05,06,07,08,09
           echo "malformed input is rejected, not crashed: OK"
 
+          # A wrapper may legitimately promise zero bytes, so a zero promise
+          # cannot double as "no promise made". It did, which let a file claim
+          # nothing and deliver something.
+          ./skidpack c textish.bin wrapped.bin
+          cp wrapped.bin zeropromise.bin
+          printf '\0\0\0' | dd of=zeropromise.bin bs=1 seek=1 conv=notrunc status=none
+          expect_reject ./skidpack d zeropromise.bin out.bin
+          ./skidpack d wrapped.bin roundtrip.bin && cmp textish.bin roundtrip.bin
+          echo "wrapper promising zero is checked, not skipped: OK"
+
+          # A container decoding to nothing reached the bulk report with a
+          # zero-length plain side and divided by zero. Eight bytes: a Huffman
+          # pass with one symbol and a declared output length of zero.
+          printf '\002\000\000\000\001\001\101\000' > ZERO.P3S
+          ./skidpack u ZERO.P3S > zero.log 2>&1
+          grep -q "INVALID FORMAT" zero.log
+          test ! -f ZERO.3SH
+          echo "empty bulk output refused, no twin written: OK"
+
           # Both dialects, and the RLE-only path, which nothing above reaches.
           ./skidpack cv flat.bin lsb.bin --target bb10-res
           ./skidpack d  lsb.bin  lsbout.bin --target bb10-res
