@@ -119,7 +119,11 @@ jobs:
         id: v
         run: |
           set -e
-          VER=$(sed -n 's/^#define SK_VERSION "\(.*\)"/\1/p' src/version.h)
+          # tr -d '\r' is load bearing. The C sources check out CRLF for Turbo
+          # C, so without it VER is "1.0" plus a carriage return, and the
+          # archive name comes out a byte over 8.3 with nothing visibly wrong
+          # in the error message.
+          VER=$(sed -n 's/^#define SK_VERSION "\(.*\)"/\1/p' src/version.h | tr -d '\r')
           [ -n "$VER" ] || { echo "no SK_VERSION in src/version.h"; exit 1; }
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             TAG=${GITHUB_REF_NAME#v}
