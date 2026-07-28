@@ -1,9 +1,25 @@
-# LF in the repository for everything text. A CRLF shebang line makes a shell
-# script fail on Unix with a confusing "bad interpreter" error.
+# Every file is stored LF in the repository. What differs is what lands in the
+# working tree, and that follows whichever compiler is fussiest about it.
 * text=auto eol=lf
 *.sh text eol=lf
 
-# Except DOS batch files: COMMAND.COM wants CRLF and mis-parses a lone LF.
+# The C sources check out CRLF, because DOS is the primary target and Turbo C
+# 2.01 miscompiles a source file with Unix line endings: it emits a nearly
+# empty object, reports nothing, and the failure surfaces much later as a pile
+# of undefined externals at link time.
+#
+# The other four compilers read either ending, and so does every modern one, so
+# this costs the secondary hosts nothing. It used to cost whoever wanted to
+# build with Turbo C, who had to convert the tree first and remember to convert
+# it back.
+#
+# eol=crlf changes the checkout only. The blobs stay LF, so diffs, blame and
+# review are unaffected.
+*.c text eol=crlf
+*.h text eol=crlf
+
+# DOS batch files, for the same reason: COMMAND.COM wants CRLF and mis-parses a
+# lone LF.
 *.bat text eol=crlf
 
 # The manifest is space-aligned text; keep its line endings stable.
