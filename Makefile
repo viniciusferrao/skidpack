@@ -46,6 +46,10 @@ lint:
 	        -fanalyzer -O2 -c $$f -o /dev/null || exit 1; \
 	done
 
+# What a release ships to DOS instead of the markdown, which reads badly in
+# EDIT.COM. 78 columns, and CRLF because that is what DOS editors expect.
+README.TXT: README.md tools/txtify.awk
+	awk -f tools/txtify.awk README.md | sed 's/$$/\r/' > $@
 
 clean:
 	rm -f $(OBJ) skidpack skidpack.exe README.TXT
