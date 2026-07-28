@@ -26,7 +26,7 @@
  * modern terminal; LICENSE carries the accented spelling, being read where
  * UTF-8 works. */
 #define SK_TAGLINE SK_NAME " " SK_VERSION ": " SK_DESCRIPTION "\n"
-#define SK_COPYRIGHT "Copyleft (c) " SK_YEAR " " SK_DEV "\n"
+#define SK_COPYRIGHT "Copyright (c) " SK_YEAR " " SK_DEV "\n"
 
 #define SK_BANNER SK_TAGLINE SK_COPYRIGHT
 
