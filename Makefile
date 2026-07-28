@@ -52,6 +52,6 @@ README.TXT: README.md tools/txtify.awk
 	awk -f tools/txtify.awk README.md | sed 's/$$/\r/' > $@
 
 clean:
-	rm -f $(OBJ) skidpack skidpack.exe README.TXT
+	rm -f $(OBJ) skidpack skidpack.exe README.TXT test/corpus test/corpus.exe
 
 .PHONY: check sweep format lint clean

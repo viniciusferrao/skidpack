@@ -136,11 +136,18 @@ static unsigned long file_size(const char *path)
     return n;
 }
 
+/* A read error is not a difference.
+ *
+ * fread stopping short means end of file OR an error, and only ferror tells
+ * them apart. Without asking, an unreadable file compares unequal to itself and
+ * the row is filed as "repacked bytes differ from the shipped file" - which
+ * sends whoever reads that report looking for a compression bug that is not
+ * there. Media this tool is aimed at is exactly where that happens. */
 static int files_equal(const char *a, const char *b)
 {
     static unsigned char ba[2048], bb[2048];
     FILE                *fa, *fb;
-    int                  same = 1;
+    int                  same = 1, ioerr = 0;
 
     fa = fopen(a, "rb");
     if (!fa) return 0;
@@ -153,6 +160,10 @@ static int files_equal(const char *a, const char *b)
     for (;;) {
         size_t na = fread(ba, 1, sizeof(ba), fa);
         size_t nb = fread(bb, 1, sizeof(bb), fb);
+        if (ferror(fa) || ferror(fb)) {
+            ioerr = 1;
+            break;
+        }
         if (na != nb) {
             same = 0;
             break;
@@ -163,8 +174,13 @@ static int files_equal(const char *a, const char *b)
             break;
         }
     }
-    fclose(fa);
-    fclose(fb);
+    if (fclose(fa) != 0) ioerr = 1;
+    if (fclose(fb) != 0) ioerr = 1;
+
+    if (ioerr) {
+        fprintf(stderr, "corpus: error reading %s or %s\n", a, b);
+        return 0;
+    }
     return same;
 }
 
@@ -198,16 +214,23 @@ static int files_equal(const char *a, const char *b)
 #    define CMD_CH(c) ((char)(c))
 #endif
 
-static void join2(char *out, const char *a, const char *b)
+/* Both return 0, or -1 having produced a shortened path.
+ *
+ * The caller has to look. A truncated path names a file that is not the one
+ * asked for: usually it fails to open and the row is reported as a missing or
+ * altered release, which sends the reader looking at their game files instead
+ * of at the directory name they typed. */
+static int join2(char *out, const char *a, const char *b)
 {
     size_t n = 0;
     while (*a && n < PATHMAX - 1) out[n++] = *a++;
     if (n < PATHMAX - 1) out[n++] = SEP;
     while (*b && n < PATHMAX - 1) out[n++] = *b++;
     out[n] = '\0';
+    return (*a || *b) ? -1 : 0;
 }
 
-static void join3(char *out, const char *a, const char *b, const char *c)
+static int join3(char *out, const char *a, const char *b, const char *c)
 {
     size_t n = 0;
     while (*a && n < PATHMAX - 1) out[n++] = *a++;
@@ -216,6 +239,7 @@ static void join3(char *out, const char *a, const char *b, const char *c)
     if (n < PATHMAX - 1) out[n++] = SEP;
     while (*c && n < PATHMAX - 1) out[n++] = *c++;
     out[n] = '\0';
+    return (*a || *b || *c) ? -1 : 0;
 }
 
 /* Split a line on runs of whitespace, in place. Returns the field count.
@@ -241,6 +265,64 @@ static int split_fields(char *line, char **field, int maxfields)
     return n;
 }
 
+/* Whether a double-quoted argument reaches the child as one argument.
+ *
+ * cmd.exe and every Unix shell group on double quotes, so a releases directory
+ * with a space in its name survives. 16-bit DOS neither needs that nor is asked
+ * to do it: no DOS directory name may contain a space in the first place, and
+ * COMMAND.COM parses the program's own path itself with no notion of quoting
+ * at all, so a quote there would become part of the name it looks for. A space
+ * is refused outright on that side rather than quoted on faith. */
+#if defined(__MSDOS__) || defined(MSDOS) || defined(_MSDOS) || \
+    defined(__TURBOC__)
+#    define Q ""
+#else
+#    define Q "\""
+#endif
+
+/* cmd.exe strips the first and last quote of a command line that begins with
+ * one, which turns a correctly quoted line into nonsense: it reported "the
+ * filename, directory name, or volume label syntax is incorrect" for all 314
+ * rows. Its own answer is an extra outer pair, which it removes and leaves
+ * everything inside intact. sh has no such rule and would read the whole line
+ * as a single word, so this wrapper is the one part of the quoting that belongs
+ * to Windows alone. */
+#if defined(_WIN32)
+#    define WRAP "\""
+#else
+#    define WRAP ""
+#endif
+
+/* Append the whole of `s`, or report that it did not fit. Truncating instead is
+ * what makes this worth a function: a command line that quietly lost its tail
+ * still runs, on the wrong arguments, and the failure is then reported against
+ * skidpack rather than against the driver that mangled the request. */
+static int cmd_add(char *cmd, size_t cap, size_t *n, const char *s, int xlate)
+{
+    while (*s) {
+        if (*n + 1 >= cap) return -1;
+        cmd[*n] = xlate ? CMD_CH(*s) : *s;
+        ++*n;
+        ++s;
+    }
+    return 0;
+}
+
+/* A path this driver will not put on a command line.
+ *
+ * A double quote ends the quoting on the hosts that have it and is not a legal
+ * filename character on the ones that do not. A space is fine wherever Q is a
+ * quote and impossible in a DOS name, so it is refused there rather than
+ * silently splitting one argument into two. */
+static int path_hostile(const char *p)
+{
+    for (; *p; ++p) {
+        if (*p == '"') return 1;
+        if (*p == ' ' && Q[0] == '\0') return 1;
+    }
+    return 0;
+}
+
 /* Build and run one skidpack invocation. system() is the only way to start a
  * program from C89, and it is what a shell script did anyway.
  *
@@ -254,35 +336,48 @@ static int split_fields(char *line, char **field, int maxfields)
  * standard C, and this file compiles unchanged on five compilers across three
  * decades. Callers here decide by looking at the output file, which needs no
  * ifdef and asks the better question anyway: whether the bytes are right,
- * rather than what a process claimed on its way out. */
+ * rather than what a process claimed on its way out.
+ *
+ * Returns -1 without running anything when the command could not be built, so
+ * that a refusal here is never mistaken for a result from skidpack. */
 static int run(const char *sk, const char *mode, const char *in,
                const char *out, const char *target, int sdtitl)
 {
     char        cmd[LINEMAX];
     size_t      n = 0;
-    const char *parts[9];
-    int         i, np = 0;
+    const char *parts[13];
+    int         i, np = 0, bad = 0;
+
+    if (path_hostile(sk) || path_hostile(in) || path_hostile(out)) {
+        fprintf(stderr,
+                "corpus: a path contains a character this driver cannot put "
+                "on a command line\n");
+        return -1;
+    }
 
     /* The program's path goes down first and on its own, since it is the one
      * part of the line the interpreter reads for separators. */
-    while (*sk && n < sizeof(cmd) - 1) {
-        char c = *sk++;
-        cmd[n++] = CMD_CH(c);
-    }
+    bad |= cmd_add(cmd, sizeof(cmd), &n, WRAP Q, 0);
+    bad |= cmd_add(cmd, sizeof(cmd), &n, sk, 1);
+    bad |= cmd_add(cmd, sizeof(cmd), &n, Q, 0);
 
     parts[np++] = " ";
     parts[np++] = mode;
-    parts[np++] = " ";
+    parts[np++] = " " Q;
     parts[np++] = in;
-    parts[np++] = " ";
+    parts[np++] = Q " " Q;
     parts[np++] = out;
-    parts[np++] = " -target ";
+    parts[np++] = Q " -target ";
     parts[np++] = target;
     parts[np++] = sdtitl ? " -sdtitl" : "";
+    parts[np++] = WRAP;
 
-    for (i = 0; i < np; ++i) {
-        const char *s = parts[i];
-        while (*s && n < sizeof(cmd) - 1) cmd[n++] = *s++;
+    for (i = 0; i < np; ++i) bad |= cmd_add(cmd, sizeof(cmd), &n, parts[i], 0);
+
+    if (bad) {
+        fprintf(stderr, "corpus: command line longer than %d bytes, not run\n",
+                (int)sizeof(cmd));
+        return -1;
     }
     cmd[n] = '\0';
     return system(cmd);
@@ -314,13 +409,16 @@ static int sweep_one(const char *sk, const char *path, const char *raw,
      * outright, as files that decoded and then failed to reproduce. */
     for (t = 0; t < 2; ++t) {
         remove(raw);
-        run(sk, "d", path, raw, targets[t], 0);
+        /* A negative return is the driver's own, not the child's: it means the
+         * command was never built, so there is no output to judge and treating
+         * this row as "not a container" would be a lie. */
+        if (run(sk, "d", path, raw, targets[t], 0) < 0) return -2;
         if (file_size(raw) == 0) continue;
         decoded = 1;
 
         for (m = 0; m < 2; ++m) {
             remove(rep);
-            run(sk, modes[m], raw, rep, targets[t], 0);
+            if (run(sk, modes[m], raw, rep, targets[t], 0) < 0) return -2;
             if (file_size(rep) == 0) continue;
             if (files_equal(rep, path)) return 1;
         }
@@ -344,8 +442,12 @@ static int do_sweep(int argc, char **argv)
             printf("  MISMATCH: %s\n", argv[i]);
             ++bad;
             break;
-        default:
+        case -1:
             ++skip;
+            break;
+        default:
+            printf("  NOT RUN: %s\n", argv[i]);
+            ++bad;
             break;
         }
     }
@@ -437,7 +539,12 @@ static int do_check(int argc, char **argv)
          * reporting. If it was found only by the flat fallback and the hash is
          * wrong, it is simply a row belonging to a different release, so it is
          * absent rather than broken. Releases share filenames throughout. */
-        join3(src, root, rel, name);
+        if (join3(src, root, rel, name)) {
+            printf("%s/%s: path longer than %d bytes, not checked\n", rel, name,
+                   PATHMAX - 1);
+            ++bad;
+            continue;
+        }
         if (hash_file(src, hex, &size) == 0) {
             if (strcmp(hex, pcrc) != 0) {
                 printf("%s/%s: shipped file does not match the recorded hash\n",
@@ -452,7 +559,12 @@ static int do_check(int argc, char **argv)
                 continue;
             }
         } else {
-            join2(src, root, name);
+            if (join2(src, root, name)) {
+                printf("%s/%s: path longer than %d bytes, not checked\n", rel,
+                       name, PATHMAX - 1);
+                ++bad;
+                continue;
+            }
             if (hash_file(src, hex, &size) != 0 || strcmp(hex, pcrc) != 0) {
                 ++absent;
                 continue;
@@ -469,8 +581,15 @@ static int do_check(int argc, char **argv)
          * place and the hash below would be taken from it. Releases share many
          * byte-identical resources, so a stale file can match. */
         remove(raw);
-        if (run(sk, "d", src, raw, target, 0) != 0) {
-            printf("%s/%s: decompression failed\n", rel, name);
+        /* Negative, not nonzero. A negative return is the driver refusing to
+         * build the command, which it has already explained; anything else is
+         * system()'s, and sweep_one's comment says why that number cannot be
+         * believed on DOS. Trusting it here and not there was the inconsistency
+         * inside this one file. What actually settles it is the hash below,
+         * taken from a file removed a line ago, so a child that failed leaves
+         * nothing to hash. */
+        if (run(sk, "d", src, raw, target, 0) < 0) {
+            printf("%s/%s: not run\n", rel, name);
             ++bad;
             continue;
         }
@@ -489,8 +608,8 @@ static int do_check(int argc, char **argv)
         }
 
         remove(rep);
-        if (run(sk, mode, raw, rep, target, strcmp(bug, "-") != 0) != 0) {
-            printf("%s/%s: repack failed\n", rel, name);
+        if (run(sk, mode, raw, rep, target, strcmp(bug, "-") != 0) < 0) {
+            printf("%s/%s: not run\n", rel, name);
             ++bad;
             continue;
         }

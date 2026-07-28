@@ -150,6 +150,66 @@ jobs:
           cmp repetitive.bin nsout.bin
           echo "LSB dialect, RLE-only and --noseq round trips: OK"
 
+      # The driver is the thing that decides whether 314 files passed, so a
+      # buffer fault in it is worse than one in the packer: it reports a pass.
+      # It had been in cppcheck, the analyzer and the formatter but had never
+      # been compiled and run by CI at all, because the corpus it drives needs
+      # game data no runner can have. sweep needs no manifest, so the driver
+      # itself can be exercised on files made here.
+      - name: Build and exercise the corpus driver
+        run: |
+          set -e
+          export LC_ALL=C
+          clang -std=c90 -pedantic-errors -Wall -Wextra -g -O1 \
+                -fsanitize=address,undefined -fno-omit-frame-pointer \
+                -o corpus test/corpus.c
+
+          export ASAN_OPTIONS=halt_on_error=1:exitcode=86
+          export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:exitcode=87
+
+          # p2 and lsb.bin only. sweep repacks with c and cv and no other
+          # option, so p3 (--sdtitl, 96 bytes appended) and rle.bin (cr with a
+          # given escape table) cannot come back byte for byte and would be
+          # reported as mismatches - correctly, which is why they are not here.
+          ./corpus sweep ./skidpack p2 lsb.bin | tee sweep.log
+          grep -q "reproduced: 2" sweep.log
+          grep -q "mismatched: 0" sweep.log
+
+          # Not a container, and it must say so rather than counting it as a
+          # failure to reproduce.
+          ./corpus sweep ./skidpack flat.bin | grep -q "not a container: 1"
+          echo "corpus driver runs clean under ASan and UBSan: OK"
+
+      # Two ways a path can defeat a driver that builds command lines by hand.
+      # Both were live: an unquoted space split one argument into two, and a
+      # quote ended the quoting early. The first is the common one - anybody
+      # whose game lives under a directory with a space in its name - and it
+      # made all 314 rows fail on Windows the moment quoting was added
+      # carelessly, so it is worth a regression rather than an assumption.
+      - name: Awkward paths
+        run: |
+          set -e
+          mkdir -p "a dir with spaces"
+          cp p2 "a dir with spaces/PACKED.PVS"
+          cp skidpack "a dir with spaces/sk with spaces"
+          ./corpus sweep "a dir with spaces/sk with spaces" \
+                         "a dir with spaces/PACKED.PVS" | tee spaced.log
+          grep -q "reproduced: 1" spaced.log
+          echo "spaces in the program path and the file path: OK"
+
+          # A double quote is legal in a POSIX filename and cannot be passed
+          # through any of the three interpreters this driver targets. Refusing
+          # it by name beats emitting a line that means something else.
+          cp p2 'quote".PVS'
+          set +e
+          ./corpus sweep ./skidpack 'quote".PVS' > quoted.log 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          grep -q "cannot put" quoted.log
+          grep -q "NOT RUN" quoted.log
+          echo "a path the driver cannot quote is refused, not mangled: OK"
+
   # Blocking, because the tree conforms. The version is pinned: clang-format's
   # options and their defaults change between majors, so an unpinned formatter
   # reformats the tree the day the runner image moves.
@@ -182,12 +242,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The driver builds under the same flags as the tool it checks. It is
+      # C89 for the same reason and on the same five compilers, so a warning
+      # here is as real as one in src/.
       - name: Build (strict C90)
         run: |
           ${{ matrix.cc }} -std=c90 -pedantic-errors \
             -Wall -Wextra -Wshadow -Wcast-qual -Wformat=2 \
             -Wstrict-prototypes -Wmissing-prototypes \
             -O2 -o skidpack src/*.c
+          ${{ matrix.cc }} -std=c90 -pedantic-errors \
+            -Wall -Wextra -Wshadow -Wcast-qual -Wformat=2 \
+            -Wstrict-prototypes -Wmissing-prototypes \
+            -O2 -o corpus test/corpus.c
 
       - name: Self-check
         run: |
@@ -240,6 +307,12 @@ jobs:
           fi
           echo "container compression refuses incompressible input: OK"
 
+          # macOS is the second host the driver has ever been run on, and the
+          # one place its Unix branch is exercised outside Linux.
+          ./corpus sweep ./skidpack packed2.bin packed3.bin | tee sweep.log
+          grep -q "mismatched: 0" sweep.log
+          echo "corpus driver reproduces what it is given: OK"
+
   freebsd:
     runs-on: ubuntu-latest
     steps:
@@ -250,6 +323,7 @@ jobs:
           run: |
             export LC_ALL=C
             cc -std=c90 -pedantic-errors -Wall -Wextra -O2 -o skidpack src/*.c
+            cc -std=c90 -pedantic-errors -Wall -Wextra -O2 -o corpus test/corpus.c
             awk 'BEGIN{s=1;for(i=0;i<100000;i++){s=(s*25173+13849)%65536;printf "%c",int(s/256)%256}}' > flat.bin
             ./skidpack cv flat.bin packed.bin
             ./skidpack d packed.bin unpacked.bin
@@ -259,6 +333,9 @@ jobs:
             ./skidpack d packed2.bin unpacked2.bin
             cmp repetitive.bin unpacked2.bin
             echo "FreeBSD round trip: OK"
+            ./corpus sweep ./skidpack packed.bin packed2.bin > sweep.log
+            grep -q "mismatched: 0" sweep.log
+            echo "FreeBSD corpus driver: OK"
 
   # p and u, on a shape resource built here rather than shipped here. The corpus
   # proves the codec against 314 real files, but it needs game data nobody can
@@ -339,6 +416,17 @@ jobs:
           ./skidpack p EMPTY.RES | grep -q "^SKIPPED  : 1"
           echo "no packed form: OK"
 
+          # A container bigger than the resource it carries. Packing refuses to
+          # produce one and says STORED, but unpacking meets them, and the saved
+          # column used to read 0% - which claims the two forms are the same
+          # size when the packed one is larger.
+          printf 'ABCDABCD' > tiny.bin
+          ./skidpack cv tiny.bin SMALL.P3S
+          test "$(wc -c < SMALL.P3S)" -gt "$(wc -c < tiny.bin)"
+          ./skidpack u SMALL.P3S | tee larger.log
+          grep -q "LARGER" larger.log
+          echo "a packed form larger than the plain one says so: OK"
+
           # The twin this writes always carries an uppercase extension, and on
           # DOS that is the same file as a lowercase one. This runner's
           # filesystem is case sensitive, which is the only place the check can
@@ -355,6 +443,31 @@ jobs:
           test ! -f CASE.PVS
           test "$(wc -c < CASE.pvs)" -eq 0
           echo "twin differing only in extension case is seen: OK"
+
+          # All eight spellings, not just the all-lowercase one. Trying only
+          # that covered two of them, so a twin written as .Pvs by whatever
+          # produced it went unseen and was quietly shadowed the moment the
+          # directory reached DOS.
+          rm -f CASE.pvs
+          for e in Pvs pVs pvS PVs PvS pVS; do
+            cp SHAPE.orig MIXED.VSH
+            rm -f MIXED.[Pp][Vv][Ss]
+            : > "MIXED.$e"
+            ./skidpack p MIXED.VSH | tee mixed.log
+            grep -q "EXISTS" mixed.log
+            test ! -f MIXED.PVS
+            test "$(wc -c < "MIXED.$e")" -eq 0
+          done
+          echo "every case of the twin extension is seen: OK"
+
+          # The report is laid out for an 80-column screen, and the legend under
+          # it is part of the report. One of those lines was 81 characters and
+          # wrapped, costing a line of the run above it on a 25-line display.
+          awk 'length($0) > 78 {
+                 printf "%s: %d columns: %s\n", FILENAME, length($0), $0; bad=1
+               }
+               END { exit bad ? 1 : 0 }' larger.log flip.log case.log mixed.log
+          echo "every report line fits 78 columns: OK"
 
           # And with no twin of either spelling, it must still write one.
           rm -f CASE.pvs
