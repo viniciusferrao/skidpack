@@ -51,15 +51,42 @@ static int read_file(const char *path, rs_buf *b)
     return (b->err || ioerr) ? -1 : 0;
 }
 
+/* The sibling temporary a write goes through, in the target's own directory so
+ * the rename that follows cannot cross a device. 8.3, because DOS. */
+static void temp_beside(const char *path, char *out)
+{
+    const char *cut = NULL, *p;
+    size_t      dlen;
+
+    for (p = path; *p; ++p)
+        if (*p == '\\' || *p == '/' || *p == ':') cut = p;
+
+    dlen = cut ? (size_t)(cut - path) + 1 : 0;
+    if (dlen) memcpy(out, path, dlen);
+    strcpy(out + dlen, "SKIDPACK.TMP");
+}
+
+/* Written to a sibling and renamed into place, rather than opened over the
+ * target directly.
+ *
+ * A write that fails partway used to leave a half-written file under the name
+ * it was aiming for. In bulk mode that is worse than losing the output: the
+ * next run sees a twin already there and refuses to touch it, so the damage
+ * sticks. A crash earlier in this tool's life left a zero-byte twin exactly
+ * that way. Full disks, floppies and removable media make it ordinary rather
+ * than exotic. */
 static int write_file(const char *path, rs_cbytep p, rs_size n)
 {
-    FILE   *f;
-    rs_size done = 0;
+    static char tmp[SK_MODPACK_PATHMAX];
+    FILE       *f;
+    rs_size     done = 0;
     if (!path) {
         fputs("skidpack: this mode needs an output file\n", stderr);
         return -1;
     }
-    f = fopen(path, "wb");
+
+    temp_beside(path, tmp);
+    f = fopen(tmp, "wb");
     if (!f) return -1;
 
     /* one byte at a time is portable across the far/huge pointer models and
@@ -67,11 +94,28 @@ static int write_file(const char *path, rs_cbytep p, rs_size n)
     while (done < n) {
         if (fputc(p[done], f) == EOF) {
             fclose(f);
+            remove(tmp);
             return -1;
         }
         ++done;
     }
-    return fclose(f) ? -1 : 0;
+    if (fclose(f) != 0) {
+        remove(tmp);
+        return -1;
+    }
+
+    /* POSIX rename replaces an existing target; DOS and Windows refuse. The
+     * single-file modes are allowed to overwrite what the caller named, so
+     * clear the way and retry there. Bulk mode never reaches the second
+     * attempt, having already established the twin does not exist. */
+    if (rename(tmp, path) != 0) {
+        remove(path);
+        if (rename(tmp, path) != 0) {
+            remove(tmp);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 /* A consistency check, not a proof of integrity.
@@ -275,9 +319,45 @@ static unsigned long saved_pct(rs_size plain, rs_size packed)
     return (unsigned long)(((plain - packed) * 100 + plain / 2) / plain);
 }
 
+/* Whether a twin is already there, allowing for the host disagreeing with DOS
+ * about case.
+ *
+ * DOS and Windows settle this themselves: their filesystems are case blind, so
+ * one open answers for every spelling. A case-sensitive host does not, and the
+ * generated name always carries an uppercase extension. An existing lowercase
+ * twin beside it would be a separate file here and the same file once the
+ * directory reaches DOS, where one silently becomes the other.
+ *
+ * Only the extension is varied. The stem is copied from the source name
+ * verbatim, so a stem that differs in case belongs to a different source file
+ * and is not this twin. That leaves the exhaustive answer, reading the
+ * directory and comparing every entry case blind, unimplemented; no published
+ * car needs it, since all of them spell the packed extension in capitals. */
 static int file_exists(const char *path)
 {
-    FILE *f = fopen(path, "rb");
+    static char alt[SK_MODPACK_PATHMAX];
+    FILE       *f = fopen(path, "rb");
+    size_t      i, n;
+
+    if (f) {
+        fclose(f);
+        return 1;
+    }
+
+    n = strlen(path);
+    if (n == 0 || n >= sizeof(alt)) return 0;
+    strcpy(alt, path);
+    for (i = n; i > 0; --i) {
+        if (alt[i - 1] == '\\' || alt[i - 1] == '/' || alt[i - 1] == ':')
+            return 0; /* no extension in this component */
+        if (alt[i - 1] == '.') break;
+    }
+    if (i == 0) return 0;
+
+    for (; alt[i]; ++i)
+        if (alt[i] >= 'A' && alt[i] <= 'Z') alt[i] = (char)(alt[i] + 32);
+
+    f = fopen(alt, "rb");
     if (!f) return 0;
     fclose(f);
     return 1;

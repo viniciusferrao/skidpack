@@ -338,3 +338,22 @@ jobs:
           : > EMPTY.RES
           ./skidpack p EMPTY.RES | grep -q "^SKIPPED  : 1"
           echo "no packed form: OK"
+
+          # The twin this writes always carries an uppercase extension, and on
+          # DOS that is the same file as a lowercase one. This runner's
+          # filesystem is case sensitive, which is the only place the check can
+          # be exercised: a Windows or DOS host answers it with one open before
+          # the added code is reached.
+          cp SHAPE.orig CASE.VSH
+          : > case.pvs
+          ./skidpack p CASE.VSH | tee case.log
+          grep -q "EXISTS" case.log
+          test ! -f CASE.PVS
+          test "$(wc -c < case.pvs)" -eq 0
+          echo "lowercase twin treated as existing: OK"
+
+          # And with no twin of either spelling, it must still write one.
+          rm -f case.pvs
+          ./skidpack p CASE.VSH > case2.log
+          test -f CASE.PVS
+          echo "no twin means write: OK"
